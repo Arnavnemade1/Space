@@ -1,0 +1,26 @@
+{
+  "name": "orbital-datacenter-testbed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "stress": "node tools/stress.mjs",
+    "stress:quick": "node tools/stress.mjs --quick",
+    "explore": "node tools/explore.mjs",
+    "verify": "vitest run && node tools/stress.mjs"
+  },
+  "dependencies": {
+    "three": "^0.171.0",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2"
+  },
+  "devDependencies": {
+    "vite": "^8.2.0",
+    "vitest": "^4.1.10"
+  }
+}

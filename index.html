@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orbital Datacenter Testbed</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🛰️</text></svg>" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="viewport"></div>
+
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-mark">◍</span>
+        <span class="brand-text">ORBITAL DATACENTER TESTBED</span>
+      </div>
+      <nav id="tabs">
+        <button class="tab active" data-tab="launch">LAUNCH</button>
+        <button class="tab" data-tab="design">DESIGN</button>
+        <button class="tab" data-tab="analysis">ANALYSIS</button>
+        <button class="tab" data-tab="sweep">SWEEP</button>
+        <button class="tab" data-tab="explore">EXPLORE</button>
+      </nav>
+      <div class="topbar-right">
+        <span id="epoch-readout" class="mono dim"></span>
+        <button id="btn-help" class="ghost">MODELS &amp; LIMITS</button>
+      </div>
+    </header>
+
+    <aside id="panel-left" class="panel">
+      <div class="panel-scroll" id="config-root"></div>
+      <div class="panel-actions">
+        <button id="btn-run" class="primary">RUN MISSION</button>
+        <button id="btn-maxpayload" class="secondary">FIND MAX PAYLOAD</button>
+      </div>
+    </aside>
+
+    <aside id="panel-right" class="panel">
+      <div class="panel-scroll" id="results-root"></div>
+    </aside>
+
+    <section id="timeline">
+      <div id="timeline-head">
+        <button id="btn-play" class="icon">▶</button>
+        <input id="scrub" type="range" min="0" max="1000" value="0" />
+        <span id="clock" class="mono">T+000.0 s</span>
+        <div id="timeline-tabs">
+          <button class="chip active" data-chart="altitude">ALT</button>
+          <button class="chip" data-chart="speed">VEL</button>
+          <button class="chip" data-chart="dynamicPressure">Q</button>
+          <button class="chip" data-chart="axialAccel">ACCEL</button>
+          <button class="chip" data-chart="angleOfAttack">AoA</button>
+          <button class="chip" data-chart="losses">ΔV LOSS</button>
+        </div>
+      </div>
+      <div id="chart-wrap"><canvas id="chart"></canvas></div>
+    </section>
+
+    <div id="hud" class="mono"></div>
+
+    <div id="modal" class="hidden">
+      <div class="modal-box">
+        <button id="modal-close" class="ghost modal-close">CLOSE</button>
+        <div id="modal-body"></div>
+      </div>
+    </div>
+
+    <div id="boot">
+      <div class="boot-inner">
+        <div class="boot-mark">◍</div>
+        <div class="boot-text">INITIALISING</div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

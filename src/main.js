@@ -1,0 +1,557 @@
+/**
+ * Application entry point: state, orchestration, and the animation loop.
+ *
+ * The physics layer knows nothing about the DOM and the render layer knows
+ * nothing about the physics beyond position vectors. This file is the only
+ * place the two meet.
+ */
+
+import { createScene, vecToScene, toScene } from './render/scene.js';
+import { createOverlays } from './render/overlays.js';
+import { createChart } from './ui/chart.js';
+import { buildConfig, buildResults } from './ui/panels.js';
+import { MODELS_DOC } from './ui/docs.js';
+
+import { VEHICLES, LAUNCH_SITES } from './sim/vehicles.js';
+import { simulateAscent, DEFAULT_GUIDANCE, findMaxPayload } from './sim/ascent.js';
+import { designDatacenter } from './sim/datacenter.js';
+import { compare } from './sim/economics.js';
+import {
+  STUDIES, exploreDesigns, exploreLaunches, rank, paretoFront, groupBy, sensitivity, toCsv,
+} from './sim/explore.js';
+import { rvToElements, orbitalPeriod, elementsToRv, sunlitFraction } from './sim/orbit.js';
+import { gmst, dateToJulian, sunPositionEci, eciToEcef, ecefToGeodetic } from './sim/frames.js';
+import { R_EARTH_EQ, DEG, G0, MU_EARTH } from './sim/constants.js';
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+const state = {
+  tab: 'launch',
+
+  // launch configuration
+  vehicleId: 'falcon9',
+  siteId: 'ksc',
+  payloadMass: 15000,
+  targetAltitude: 500e3,
+  targetInclination: 28.6,
+  reusableBooster: false,
+  f107: 150,
+  guidance: { ...DEFAULT_GUIDANCE },
+
+  // datacenter configuration
+  itPower: 10e6,
+  computeProfile: 'denseAccelerator',
+  missionYears: 10,
+  dcAltitude: 550e3,
+  dcInclination: 97.6,
+  betaAngle: 75 * DEG,
+  solarTech: 'rosaFlexible',
+  batteryTech: 'liIonSpace',
+  junctionTemp: 358.15,
+  electronicsClass: 'upscreenedCots',
+  shieldingMm: 5,
+  band: 'kaBand',
+  groundStations: 8,
+  transmitPower: 200,
+  costVehicle: 'starshipEarly',
+
+  // explore
+  study: 'orbitBand',
+  rankKey: 'totalMassT',
+  rankDir: 'min',
+  exploreViableOnly: false,
+  explore: null,
+
+  // results
+  ascent: null,
+  design: null,
+  comparison: null,
+  sweep: null,
+  maxPayload: null,
+
+  // playback
+  epoch: new Date(),
+  playing: false,
+  cursorT: 0,
+  followVehicle: false,
+};
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+const viewport = document.getElementById('viewport');
+const view = createScene(viewport);
+const overlays = createOverlays(view.scene);
+const chart = createChart(document.getElementById('chart'));
+
+const configRoot = document.getElementById('config-root');
+const resultsRoot = document.getElementById('results-root');
+const hud = document.getElementById('hud');
+const clockEl = document.getElementById('clock');
+const scrub = document.getElementById('scrub');
+
+let chartSeries = 'altitude';
+
+// ---------------------------------------------------------------------------
+// Rendering the UI
+// ---------------------------------------------------------------------------
+
+function renderConfig() {
+  configRoot.replaceChildren(buildConfig(state, applyChange, state.tab));
+}
+
+function renderResults() {
+  resultsRoot.replaceChildren(buildResults(state, state.tab));
+}
+
+/**
+ * Apply a state change.
+ * `rebuildConfig` is false for slider drags -- rebuilding the panel mid-drag
+ * would tear the input out from under the pointer.
+ */
+function applyChange(patch, rebuildConfig = true) {
+  Object.assign(state, patch);
+
+  // Design parameters recompute live; the ascent is expensive enough to be
+  // explicit, so it stays behind the RUN button.
+  const designKeys = [
+    'itPower', 'computeProfile', 'missionYears', 'dcAltitude', 'dcInclination',
+    'betaAngle', 'solarTech', 'batteryTech', 'junctionTemp', 'electronicsClass',
+    'shieldingMm', 'band', 'groundStations', 'transmitPower', 'costVehicle',
+  ];
+  if (Object.keys(patch).some((k) => designKeys.includes(k))) {
+    recomputeDesign();
+  }
+
+  // Re-ranking is a sort, not a re-simulation -- do it immediately so the
+  // metric selector feels instant on a matrix of hundreds of rows.
+  if ((patch.rankKey || patch.rankDir) && state.explore) {
+    state.explore.rows = rank(state.explore.rows, state.rankKey, state.rankDir);
+    state.explore.sensitivity = sensitivity(state.explore.rows, state.explore.axes, state.rankKey);
+    state.explore.groups = groupBy(state.explore.rows, state.explore.groupAxis, state.rankKey);
+  }
+  if (patch.study) state.explore = null;
+
+  if (rebuildConfig) renderConfig();
+  renderResults();
+  refreshScene();
+}
+
+// ---------------------------------------------------------------------------
+// Simulation drivers
+// ---------------------------------------------------------------------------
+
+function recomputeDesign() {
+  state.design = designDatacenter({
+    itPower: state.itPower,
+    altitude: state.dcAltitude,
+    inclination: state.dcInclination,
+    missionYears: state.missionYears,
+    computeProfile: state.computeProfile,
+    solarTech: state.solarTech,
+    batteryTech: state.batteryTech,
+    betaAngle: state.betaAngle,
+    shieldingMm: state.shieldingMm,
+    electronicsClass: state.electronicsClass,
+    junctionTemp: state.junctionTemp,
+    band: state.band,
+    groundStations: state.groundStations,
+    transmitPower: state.transmitPower,
+  });
+  state.comparison = compare(state.design, { launchVehicle: state.costVehicle });
+}
+
+function runAscent() {
+  const t0 = performance.now();
+  state.ascent = simulateAscent({
+    vehicle: VEHICLES[state.vehicleId],
+    site: LAUNCH_SITES[state.siteId],
+    payloadMass: state.payloadMass,
+    targetAltitude: state.targetAltitude,
+    targetInclination: state.targetInclination,
+    reusableBooster: state.reusableBooster,
+    guidance: state.guidance,
+    f107: state.f107,
+    epoch: state.epoch,
+    sampleInterval: 1.0,
+  });
+  state.maxPayload = null;
+  state.cursorT = 0;
+
+  const ms = performance.now() - t0;
+  console.info(`ascent integrated in ${ms.toFixed(0)} ms, ${state.ascent.samples.length} samples`);
+}
+
+function runExplore() {
+  const st = STUDIES[state.study];
+  const spec = st.spec();
+  const isLaunch = st.kind === 'launch';
+
+  const rows = isLaunch ? exploreLaunches(spec) : exploreDesigns(spec);
+  const okKey = isLaunch ? 'success' : 'viable';
+  const ranked = rank(rows, state.rankKey, state.rankDir);
+
+  // Group by whichever axis has the most levels -- that is usually the one the
+  // study is really about.
+  const groupAxis = Object.entries(spec.axes)
+    .sort((a, b) => b[1].length - a[1].length)[0][0];
+
+  state.explore = {
+    axes: spec.axes,
+    kind: st.kind,
+    rows: ranked,
+    okCount: rows.filter((r) => r[okKey]).length,
+    pareto: paretoFront(rows.filter((r) => r[okKey]), st.objectives ?? []),
+    sensitivity: sensitivity(rows, spec.axes, state.rankKey),
+    groups: groupBy(rows, groupAxis, state.rankKey),
+    groupAxis,
+  };
+}
+
+function runSweep() {
+  const altitudes = [300, 400, 500, 600, 700, 800, 1000, 1500, 2000, 3000, 5000,
+    8000, 12000, 20200, 35786];
+  state.sweep = altitudes.map((km) => {
+    const d = designDatacenter({
+      itPower: state.itPower,
+      altitude: km * 1000,
+      inclination: state.dcInclination,
+      missionYears: state.missionYears,
+      computeProfile: state.computeProfile,
+      solarTech: state.solarTech,
+      batteryTech: state.batteryTech,
+      betaAngle: state.betaAngle,
+      shieldingMm: state.shieldingMm,
+      electronicsClass: state.electronicsClass,
+      junctionTemp: state.junctionTemp,
+    });
+    return {
+      altitude: km * 1000,
+      krad: d.radiation.kradPerYear,
+      decayYears: d.orbit.decayYears,
+      mass: d.mass.total,
+      viable: d.viable,
+      design: d,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Scene sync
+// ---------------------------------------------------------------------------
+
+function refreshScene() {
+  const jd = dateToJulian(state.epoch);
+  view.setSunDirection(sunPositionEci(jd));
+  view.setEarthRotation(gmst(jd));
+
+  overlays.setLaunchSite(LAUNCH_SITES[state.siteId], view.earth);
+
+  if (state.tab !== 'explore') overlays.setOrbitFamily(null);
+
+  if (state.tab === 'launch' && state.ascent) {
+    const a = state.ascent;
+    overlays.setAscent(a.samples);
+    overlays.setOrbit(a.elements, a.success);
+    overlays.setGroundTrack(a.samples, view.earth);
+    overlays.setDatacenter(null, null);
+    chart.setData(a.samples, a.events);
+  } else if ((state.tab === 'design' || state.tab === 'analysis') && state.design) {
+    overlays.setAscent(null);
+    overlays.setGroundTrack(null, view.earth);
+
+    // Draw the datacenter on its design orbit.
+    const el = designOrbitElements();
+    overlays.setOrbit(el, state.design.viable);
+    const { r } = elementsToRv(el);
+    overlays.setDatacenter(state.design, r);
+    overlays.setVehicle(null);
+    chart.setData(null);
+  } else if (state.tab === 'explore') {
+    overlays.setAscent(null);
+    overlays.setGroundTrack(null, view.earth);
+    overlays.setDatacenter(null, null);
+    overlays.setOrbit(null);
+    overlays.setVehicle(null);
+
+    // Only altitude/inclination sweeps have a geometric meaning to draw.
+    const rows = state.explore?.rows ?? [];
+    const okKey = state.explore?.kind === 'launch' ? 'success' : 'viable';
+    const family = rows
+      .filter((r) => Number.isFinite(r.altitude ?? r.targetAltitude))
+      .slice(0, 120)
+      .map((r) => ({
+        altitude: r.altitude ?? r.targetAltitude,
+        inclination: r.inclination ?? r.targetInclination ?? 0,
+        viable: !!r[okKey],
+      }));
+    overlays.setOrbitFamily(family);
+    chart.setData(null);
+  } else if (state.tab === 'sweep' && state.sweep) {
+    overlays.setAscent(null);
+    overlays.setGroundTrack(null, view.earth);
+    overlays.setDatacenter(null, null);
+    // Show the viable band as a set of orbits.
+    const viable = state.sweep.filter((r) => r.viable);
+    overlays.setOrbit(viable.length ? sweepOrbitElements(viable[0].altitude) : null, true);
+    chart.setData(null);
+  }
+
+  updateHud();
+}
+
+function designOrbitElements() {
+  const a = R_EARTH_EQ + state.dcAltitude;
+  return {
+    a, e: 0, i: state.dcInclination * DEG, raan: 0.6, argp: 0, nu: 0.9,
+    p: a,
+  };
+}
+
+function sweepOrbitElements(altitude) {
+  const a = R_EARTH_EQ + altitude;
+  return { a, e: 0, i: state.dcInclination * DEG, raan: 0.6, argp: 0, nu: 0, p: a };
+}
+
+function updateHud() {
+  const lines = [];
+  if (state.tab === 'launch') {
+    const s = state.ascent ? sampleAt(state.cursorT) : null;
+    if (!s) {
+      hud.innerHTML =
+        '<span class="dim">RUN MISSION to fly the ascent.<br>' +
+        'Drag to orbit · scroll to zoom · Space to play</span>';
+      return;
+    }
+    {
+      lines.push(`ALT   <span class="hv">${(s.altitude / 1000).toFixed(2)}</span> km`);
+      lines.push(`VEL   <span class="hv">${s.speed.toFixed(0)}</span> m/s inertial`);
+      lines.push(`AIR   <span class="hv">${s.relativeSpeed.toFixed(0)}</span> m/s relative`);
+      lines.push(`Q     <span class="hv">${(s.dynamicPressure / 1000).toFixed(2)}</span> kPa`);
+      lines.push(`γ     <span class="hv">${s.flightPathAngle.toFixed(1)}</span>°`);
+      lines.push(`MASS  <span class="hv">${(s.mass / 1000).toFixed(1)}</span> t`);
+      lines.push(`LAT   <span class="hv">${s.latitude.toFixed(2)}</span>°  LON <span class="hv">${s.longitude.toFixed(2)}</span>°`);
+    }
+  } else if (state.tab === 'explore') {
+    const e = state.explore;
+    if (!e) {
+      hud.innerHTML = '<span class="dim">Pick a question and press RUN MISSION.</span>';
+      return;
+    }
+    const st = STUDIES[state.study];
+    lines.push(`STUDY <span class="hv">${st.name}</span>`);
+    lines.push(`CASES <span class="hv">${e.rows.length}</span> evaluated`);
+    lines.push(`CLOSE <span class="hv">${e.okCount}</span> (${((e.okCount / e.rows.length) * 100).toFixed(0)}%)`);
+    if (e.sensitivity?.length) {
+      const top = e.sensitivity[0];
+      lines.push(`DRIVER <span class="hv">${top.axis}</span> — ${top.medianFoldChange === Infinity ? '∞' : top.medianFoldChange.toFixed(1)}× spread`);
+    }
+    lines.push('');
+    lines.push('<span class="dim">green orbits close · red do not</span>');
+  } else if (state.design) {
+    const d = state.design;
+    lines.push(`LOAD  <span class="hv">${(d.power.totalPower / 1e6).toFixed(2)}</span> MW`);
+    lines.push(`RAD   <span class="hv">${Math.round(d.thermal.area).toLocaleString()}</span> m²`);
+    lines.push(`ARRAY <span class="hv">${Math.round(d.power.array.area).toLocaleString()}</span> m²`);
+    lines.push(`MASS  <span class="hv">${(d.mass.total / 1000).toFixed(0)}</span> t`);
+    lines.push(`SPAN  <span class="hv">${Math.sqrt(d.power.array.area).toFixed(0)}</span> m across`);
+    lines.push('');
+    lines.push('<span class="dim">scroll to zoom · the structure is drawn to scale</span>');
+  }
+  hud.innerHTML = lines.join('<br>');
+}
+
+function sampleAt(t) {
+  const s = state.ascent?.samples;
+  if (!s?.length) return null;
+  let lo = 0;
+  let hi = s.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (s[mid].t < t) lo = mid + 1; else hi = mid;
+  }
+  return s[lo];
+}
+
+// ---------------------------------------------------------------------------
+// Playback
+// ---------------------------------------------------------------------------
+
+function setCursor(t) {
+  state.cursorT = t;
+  chart.setCursor(t);
+
+  const s = sampleAt(t);
+  if (s) {
+    overlays.setVehicle(s.r);
+    clockEl.textContent = `T+${t.toFixed(1)} s`;
+    if (state.followVehicle) view.focusOn(vecToScene(s.r), 400e3);
+  }
+  updateHud();
+}
+
+document.getElementById('btn-play').addEventListener('click', (e) => {
+  state.playing = !state.playing;
+  e.target.textContent = state.playing ? '❚❚' : '▶';
+});
+
+scrub.addEventListener('input', (e) => {
+  const total = state.ascent?.summary.flightTime ?? 1;
+  setCursor((Number(e.target.value) / 1000) * total);
+  state.playing = false;
+  document.getElementById('btn-play').textContent = '▶';
+});
+
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
+
+document.querySelectorAll('.tab').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.tab = btn.dataset.tab;
+    renderConfig();
+    renderResults();
+    refreshScene();
+
+    if (state.tab === 'design' || state.tab === 'analysis') {
+      const { r } = elementsToRv(designOrbitElements());
+      view.focusOn(vecToScene(r), 2500);
+    } else {
+      view.focusEarth();
+      if (state.tab === 'explore') view.frameRadius(45000e3, 1.1);
+    }
+  });
+});
+
+document.querySelectorAll('.chip').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.chip').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    chartSeries = btn.dataset.chart;
+    chart.setSeries(chartSeries);
+  });
+});
+
+const btnRun = document.getElementById('btn-run');
+btnRun.addEventListener('click', () => {
+  btnRun.disabled = true;
+  btnRun.textContent = 'INTEGRATING…';
+  // Yield to the event loop so the disabled/busy button paints before the
+  // (synchronous) solve blocks it. Deliberately setTimeout and not
+  // requestAnimationFrame: rAF is throttled whenever the page is not actually
+  // painting -- a background tab, an offscreen window -- and the whole run
+  // would silently never start.
+  setTimeout(() => {
+    try {
+      if (state.tab === 'explore') runExplore();
+      else if (state.tab === 'sweep') runSweep();
+      else {
+        runAscent();
+        recomputeDesign();
+      }
+      renderResults();
+      refreshScene();
+      if (state.ascent) setCursor(0);
+    } finally {
+      btnRun.disabled = false;
+      btnRun.textContent = 'RUN MISSION';
+    }
+  }, 0);
+});
+
+const btnMax = document.getElementById('btn-maxpayload');
+btnMax.addEventListener('click', () => {
+  btnMax.disabled = true;
+  btnMax.textContent = 'SEARCHING…';
+  setTimeout(() => {
+    try {
+      state.maxPayload = findMaxPayload({
+        vehicle: VEHICLES[state.vehicleId],
+        site: LAUNCH_SITES[state.siteId],
+        targetAltitude: state.targetAltitude,
+        targetInclination: state.targetInclination,
+        reusableBooster: state.reusableBooster,
+        guidance: state.guidance,
+        f107: state.f107,
+        epoch: state.epoch,
+        sampleInterval: 4,
+      });
+      if (state.maxPayload.result) {
+        state.ascent = state.maxPayload.result;
+        state.payloadMass = Math.round(state.maxPayload.payload);
+      }
+      renderConfig();
+      renderResults();
+      refreshScene();
+      setCursor(0);
+    } finally {
+      btnMax.disabled = false;
+      btnMax.textContent = 'FIND MAX PAYLOAD';
+    }
+  }, 0);
+});
+
+// Modal
+const modal = document.getElementById('modal');
+document.getElementById('btn-help').addEventListener('click', () => {
+  document.getElementById('modal-body').innerHTML = MODELS_DOC;
+  modal.classList.remove('hidden');
+});
+document.getElementById('modal-close').addEventListener('click', () => modal.classList.add('hidden'));
+modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+
+addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') modal.classList.add('hidden');
+  if (e.key === ' ' && !['INPUT', 'SELECT'].includes(e.target.tagName)) {
+    e.preventDefault();
+    document.getElementById('btn-play').click();
+  }
+  if (e.key === 'f') {
+    state.followVehicle = !state.followVehicle;
+    if (!state.followVehicle) view.focusEarth();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Animation loop
+// ---------------------------------------------------------------------------
+
+let last = performance.now();
+const PLAYBACK_RATE = 8; // simulated seconds per wall-clock second
+
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+
+  if (state.playing && state.ascent) {
+    const total = state.ascent.summary.flightTime;
+    let t = state.cursorT + dt * PLAYBACK_RATE;
+    if (t >= total) { t = total; state.playing = false; document.getElementById('btn-play').textContent = '▶'; }
+    setCursor(t);
+    scrub.value = String((t / total) * 1000);
+  }
+
+  document.getElementById('epoch-readout').textContent =
+    state.epoch.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+
+  view.render();
+  requestAnimationFrame(loop);
+}
+
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+
+recomputeDesign();
+renderConfig();
+renderResults();
+refreshScene();
+chart.setSeries(chartSeries);
+requestAnimationFrame(loop);
+
+setTimeout(() => document.getElementById('boot').classList.add('done'), 220);
