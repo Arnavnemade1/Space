@@ -37,6 +37,7 @@ import { buildStation, updateStation, disposeStation } from './station.js';
 import { R_EARTH_EQ, OMEGA_EARTH } from '../sim/constants.js';
 import { atmosphere } from '../sim/atmosphere.js';
 import { gmst, dateToJulian, sunPositionEci } from '../sim/frames.js';
+import { sunlitFraction } from '../sim/orbit.js';
 
 export const PHASES = [
   { key: 'pad',        from: 0.00, to: 0.04, label: 'Pad' },
@@ -123,6 +124,7 @@ export function createPlayback(view) {
   let padSmoke = null;
   let padModel = null;
   let altSpoke = null;
+  let orbitTrail = null;
   const beacons = {};
 
   // Set on a phase change and cleared at the END of update(), so BOTH cameras
@@ -176,6 +178,7 @@ export function createPlayback(view) {
     ascentTrail = returnTrail = orbitRing = debris = padSmoke = null;
     padModel = null;
     altSpoke = null;
+    orbitTrail = null;
     plane = null;
     trackReady = false;
     for (const k of Object.keys(beacons)) delete beacons[k];
@@ -204,6 +207,7 @@ export function createPlayback(view) {
     const p = new THREE.Points(g, m);
     p.frustumCulled = false;
     p.visible = false;
+    p.layers.set(1);
     root.add(track(p));
     return p;
   }
@@ -297,6 +301,7 @@ export function createPlayback(view) {
     g.add(glow);
 
     g.userData = { line, glow, base: new THREE.Color(color), maxPoints };
+    g.traverse((c) => c.layers.set(1));
     root.add(track(g));
     return g;
   }
@@ -391,7 +396,13 @@ export function createPlayback(view) {
     }));
     altSpoke.frustumCulled = false;
     altSpoke.visible = false;
+    altSpoke.layers.set(1);
     root.add(track(altSpoke));
+
+    // A short arc trailing the station. On a static ring nothing tells you
+    // which way round the orbit it is going, or that it is moving at all.
+    orbitTrail = makeTrail(0x9dffc9, ORBIT_TRAIL_POINTS + 2, 4);
+    orbitTrail.visible = false;
 
     // ---- orbital plane -----------------------------------------------------
     // Taken from the injection state, not from the requested inclination with
@@ -419,6 +430,7 @@ export function createPlayback(view) {
       new THREE.BufferGeometry().setFromPoints(pts),
       new THREE.LineBasicMaterial({ color: 0x5fa6c6, transparent: true, opacity: 0.30 }));
     orbitRing.visible = false;
+    orbitRing.layers.set(1);
     root.add(track(orbitRing));
 
     // ---- pad exhaust cloud -------------------------------------------------
@@ -450,6 +462,7 @@ export function createPlayback(view) {
       return v.multiplyScalar(toScene(40e3 + Math.random() * 90e3));
     });
     debris.visible = false;
+    debris.layers.set(1);
     root.add(track(debris));
   }
 
@@ -667,6 +680,13 @@ export function createPlayback(view) {
     padSmoke.material.size = toScene(vehicleRadius * 6);
   }
 
+  /** Mark an object (and its children) as wide-shot only -- see scene.js. */
+  const WIDE_ONLY = 1;
+  function wideOnly(o) {
+    o.traverse((c) => c.layers.set(WIDE_ONLY));
+    return o;
+  }
+
   /** Draw the altitude spoke under a vehicle, or hide it. */
   function setSpoke(r, h) {
     if (!altSpoke) return;
@@ -756,6 +776,21 @@ export function createPlayback(view) {
     if (along.lengthSq() < 0.5) return;   // never true for a real orbit; cheap guard
     const up = new THREE.Vector3().crossVectors(along, hHat).normalize();
     group.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(along, up, hHat));
+  }
+
+
+  /** Fading arc behind the station, so its direction of travel reads. */
+  const ORBIT_TRAIL_POINTS = 96;
+  function setOrbitTrail(altKm, revs) {
+    if (!orbitTrail) return;
+    const samples = [];
+    // A quarter of a revolution of history is enough to read as motion without
+    // becoming a second orbit ring.
+    for (let i = 0; i <= ORBIT_TRAIL_POINTS; i++) {
+      const back = (1 - i / ORBIT_TRAIL_POINTS) * 0.25;
+      samples.push({ t: i, r: orbitPosition(altKm, revs - back), altitude: 0 });
+    }
+    fillTrail(orbitTrail, samples, Infinity);
   }
 
   // ------------------------------------------------------------------ camera
@@ -964,6 +999,7 @@ export function createPlayback(view) {
       }
 
       if (orbitRing) orbitRing.visible = t > flightTime * 0.6;
+      if (orbitTrail) orbitTrail.visible = false;
       station.group.visible = false;
       setBeacon(beacons.station, null, false);
 
@@ -998,6 +1034,7 @@ export function createPlayback(view) {
       station.group.visible = false;
       setBeacon(beacons.station, null, false);
       if (orbitRing) orbitRing.visible = true;
+      if (orbitTrail) orbitTrail.visible = false;
       fillTrail(ascentTrail, asc.samples, flightTime);
       const inj = asc.samples[asc.samples.length - 1];
       setBeacon(beacons.vehicle, inj.r, true, inj.altitude);
@@ -1096,6 +1133,14 @@ export function createPlayback(view) {
       const eci = orbitPosition(altKm, revs);
       syncEarth(displaySeconds);
 
+      // Real eclipse, from the exact solar-disk overlap rather than a
+      // cylindrical shadow test. This orbit is in Earth's shadow for a third
+      // of every ninety minutes, and a station that stays evenly lit through
+      // that is the clearest possible tell that none of it is real. It also
+      // costs nothing: the engine already sizes the batteries off this number.
+      const sunEci = sunPositionEci(jd0 + displaySeconds / 86400);
+      const lit = sunlitFraction(eci, sunEci);
+
       station.group.visible = true;
       station.group.position.copy(vecToScene(eci));
       orient(station.group, eci);
@@ -1104,8 +1149,11 @@ export function createPlayback(view) {
         thermal: pr.thermalFactor,
         array: pr.arrayFactor,
         dose: pr.doseFactor,
+        lit,
+        time: displaySeconds,
       });
       setBeacon(beacons.station, eci, true);
+      setOrbitTrail(altKm, revs);
 
       if (reentering && lp > 0.45) {
         debris.visible = true;
@@ -1159,6 +1207,7 @@ export function createPlayback(view) {
         ['NET', `${Math.round(pr.effective * 100)}%`],
         ['THERMAL', `${Math.round(pr.thermalFactor * 100)}%`],
         ['ALT', `${altKm.toFixed(0)} km`],
+        ['SUN', lit > 0.995 ? 'full' : lit < 0.005 ? 'ECLIPSE' : `${Math.round(lit * 100)}% partial`],
       ];
       out.telemetry = pr;
       // State the compression rather than hiding it: the orbit really is being

@@ -167,6 +167,7 @@ button { font-family: var(--font-ui); }
 }
 .verdict.ok   { background: rgba(94,224,138,0.08); border-color: rgba(94,224,138,0.35); color: var(--good); }
 .verdict.fail { background: rgba(255,107,107,0.08); border-color: rgba(255,107,107,0.35); color: var(--bad); }
+.verdict.warn { background: rgba(255,199,90,0.08); border-color: rgba(255,199,90,0.35); color: var(--warn); }
 
 .issue {
   border-left: 2px solid; padding: 6px 9px; margin-bottom: 6px;

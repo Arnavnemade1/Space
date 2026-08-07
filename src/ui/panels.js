@@ -576,6 +576,15 @@ function missionResults(state) {
   }));
   wrap.appendChild(note(end));
 
+  // The beta angle the design was sized against versus the one the launch
+  // actually reaches. Worth its own banner: when they disagree the engine may
+  // have sized no battery at all for an orbit that spends a third of every
+  // revolution in shadow, and nothing else on this panel would say so.
+  if (m.betaCheck?.message) {
+    wrap.appendChild(el('div', { class: 'verdict warn', text: 'ECLIPSE ASSUMPTION NOT MET' }));
+    wrap.appendChild(note(m.betaCheck.message));
+  }
+
   const phases = [
     ['1 · Pad', `${m.deployment.vehicle.name.split(' /')[0]} at ${m.deployment.site.name.split(',')[0]}`],
     ['2 · Ascent', `${fmtMass(m.deployment.deliverablePerFlight)} to ${(m.config.altitude / 1000).toFixed(0)} km`],

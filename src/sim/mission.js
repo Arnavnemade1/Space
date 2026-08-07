@@ -28,10 +28,10 @@ import { designDatacenter } from './datacenter.js';
 import { compare, LAUNCH_COSTS } from './economics.js';
 import { simulateAscent } from './ascent.js';
 import { VEHICLES, LAUNCH_SITES } from './vehicles.js';
-import { orbitalLifetime, stationKeepingDeltaV } from './orbit.js';
+import { orbitalLifetime, stationKeepingDeltaV, betaAngle, eclipseFraction } from './orbit.js';
 import { environmentalFlux, COATINGS } from './thermal.js';
 import { simulateRecovery, RECOVERY_MODES } from './recovery.js';
-import { geodeticToEcef, ecefToEci, gmst } from './frames.js';
+import { geodeticToEcef, ecefToEci, gmst, dateToJulian, sunPositionEci } from './frames.js';
 import { SIGMA_SB, T_CMB } from './constants.js';
 import { R_EARTH_EQ, G0, DEG, YEAR_JULIAN } from './constants.js';
 
@@ -639,6 +639,60 @@ export function simulateMission(cfg) {
   const terrestrialPerPflopYear = economics.terrestrial.total /
     (design.compute.petaflops * missionYears);
 
+  // --- 5b. does the flown orbit match the beta the design assumed? ---------
+  //
+  // Beta angle is a design INPUT -- the user states the angle between the orbit
+  // plane and the Sun -- and it drives eclipse fraction, which drives battery
+  // mass. But the plane the vehicle is actually injected into is decided by the
+  // launch site and azimuth, not by that input, and the two need not agree.
+  //
+  // When they disagree the consequences are severe and silent: assume beta 75
+  // degrees and the orbit never enters shadow, so the engine sizes ZERO
+  // battery. Fly the plane a Vandenberg sun-synchronous launch actually
+  // produces and beta is nearer 43 degrees, which is a third of every orbit in
+  // eclipse -- a station with no batteries at all going dark for half an hour,
+  // sixteen times a day. This checks it rather than leaving it to be noticed in
+  // the render.
+  const betaCheck = (() => {
+    if (!deployment.reference?.samples?.length) return null;
+    const inj = deployment.reference.samples[deployment.reference.samples.length - 1];
+    const [rx, ry, rz] = inj.r;
+    const [vx, vy, vz] = inj.v;
+    const h = [ry * vz - rz * vy, rz * vx - rx * vz, rx * vy - ry * vx];
+
+    // Sample a year: beta sweeps as the Sun goes round and the node regresses,
+    // so the worst case is what matters, not one instant.
+    let worstEclipse = 0;
+    let betaAtWorst = 0;
+    const jd0 = dateToJulian(startDate);
+    for (let d = 0; d < 365; d += 5) {
+      const beta = betaAngle(h, sunPositionEci(jd0 + d));
+      const frac = eclipseFraction(design.orbit.radius, beta);
+      if (frac > worstEclipse) { worstEclipse = frac; betaAtWorst = beta; }
+    }
+    const assumed = design.inputs.betaAngle ?? 0;
+    const assumedFraction = design.orbit.eclipseFraction ?? 0;
+    return {
+      assumedBetaDeg: (assumed * 180) / Math.PI,
+      assumedEclipseFraction: assumedFraction,
+      flownBetaDeg: (betaAtWorst * 180) / Math.PI,
+      flownEclipseFraction: worstEclipse,
+      // Eclipsed in flight but sized as though it never would be.
+      unbatteried: worstEclipse > 0.02 && design.mass.battery <= 0,
+      mismatch: Math.abs(worstEclipse - assumedFraction) > 0.03,
+      // Reported, not blocking: beta is a user assumption, and whether an
+      // unreachable one should sink the mission is the user's call, not this
+      // function's. The playback lights the station from the FLOWN geometry
+      // either way, so the two never silently disagree.
+      message: worstEclipse > 0.02 && design.mass.battery <= 0
+        ? `Sized for beta ${((assumed * 180) / Math.PI).toFixed(0)}° — no eclipse, no battery. `
+          + `The orbit this launch actually reaches sweeps to beta `
+          + `${Math.abs((betaAtWorst * 180) / Math.PI).toFixed(0)}° and spends `
+          + `${(worstEclipse * 100).toFixed(0)}% of each revolution in shadow.`
+        : null,
+    };
+  })();
+
   // --- 6. blockers --------------------------------------------------------
   const blockers = design.issues
     .filter((i) => i.severity === 'fatal')
@@ -660,6 +714,7 @@ export function simulateMission(cfg) {
     deployment,
     projection,
     disposal,
+    betaCheck,
     programme: {
       launchCost,
       totalCost,

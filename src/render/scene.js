@@ -390,6 +390,14 @@ export function createScene(container) {
   // steady in frame instead of swimming around.
   const trackCamera = new THREE.PerspectiveCamera(28, 16 / 10, 1e-6, 3000);
 
+  // LAYER 1 is "wide shot only": screen-space beacons, contrails, orbit rings,
+  // the altitude spoke. Those are annotations sized in pixels and drawn at an
+  // exaggerated altitude -- meaningful when the whole planet is in frame,
+  // nonsense from two hundred metres away, where a 4 px trail dot strung along
+  // the orbit is just a bright line across the shot. The main camera sees both
+  // layers; the tracking camera sees only the real geometry on layer 0.
+  camera.layers.enable(1);
+
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
     powerPreference: 'high-performance',
