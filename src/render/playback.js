@@ -122,6 +122,7 @@ export function createPlayback(view) {
   let debris = null;
   let padSmoke = null;
   let padModel = null;
+  let altSpoke = null;
   const beacons = {};
 
   // Set on a phase change and cleared at the END of update(), so BOTH cameras
@@ -134,6 +135,7 @@ export function createPlayback(view) {
   let camDist = toScene(3.0e7);
   let userDist = null;      // distance the user dragged to, honoured until phase change
   let jd0 = null;
+  let altRefH = 550e3;   // target altitude: where the wide-shot gain returns to 1
 
   // Orbital plane of the delivered station, taken from the state the ascent
   // actually injected into rather than assumed. Filled in by load().
@@ -173,6 +175,7 @@ export function createPlayback(view) {
     disposed = [];
     ascentTrail = returnTrail = orbitRing = debris = padSmoke = null;
     padModel = null;
+    altSpoke = null;
     plane = null;
     trackReady = false;
     for (const k of Object.keys(beacons)) delete beacons[k];
@@ -205,10 +208,57 @@ export function createPlayback(view) {
     return p;
   }
 
-  function setBeacon(b, vecEci, visible = true) {
+
+  // ------------------------------------------------------- wide-shot altitude
+  /**
+   * Altitude gain for the WIDE SHOT only.
+   *
+   * A whole-globe view cannot show an ascent honestly, and the arithmetic is
+   * brutal: the vehicle is 6 km up a minute after liftoff, on a planet 12,756
+   * km across. Measured on screen, that put it 0.1 px above the surface while
+   * the marker drawn on it was 18 px wide -- the marker covered a hundred and
+   * eighty times the height the rocket had gained, so it sat welded to the limb
+   * for the entire climb even though the tracking camera clearly showed it
+   * leaving. Zooming does not help: altitude over Earth diameter is a ratio, so
+   * it stays 3.9% at any camera range.
+   *
+   * So the wide shot exaggerates altitude, and says so in the HUD. The map is
+   *
+   *     h' = K.h / (1 + (K-1).h/H)
+   *
+   * which is monotone, exactly zero at the ground, and exactly TRUE at the
+   * target altitude H -- its slope is K near the surface and 1/K at H. That
+   * last property is the point: by the time the vehicle reaches orbit the
+   * exaggeration has wound itself back to nothing, so the injected vehicle, the
+   * orbit ring and the station all sit at the same true radius and nothing
+   * downstream has to know this function exists.
+   *
+   * It is applied ONLY to the wide-shot devices -- beacons, contrails, the
+   * altitude spoke. The 3-D geometry stays where the physics put it, which is
+   * what the tracking inset is looking at, and every number in the HUD is the
+   * true one.
+   */
+  const ALT_GAIN = 15;
+
+  function liftEci(r, h) {
+    if (!(h > 0)) return r;
+    const hd = (ALT_GAIN * h) / (1 + ((ALT_GAIN - 1) * h) / altRefH);
+    const R = Math.hypot(r[0], r[1], r[2]);
+    const k = (R + (hd - h)) / R;
+    return [r[0] * k, r[1] * k, r[2] * k];
+  }
+
+  /** Drop a position onto the surface directly below it. */
+  function dropEci(r, h) {
+    const R = Math.hypot(r[0], r[1], r[2]);
+    const k = (R - Math.max(h, 0)) / R;
+    return [r[0] * k, r[1] * k, r[2] * k];
+  }
+
+  function setBeacon(b, vecEci, visible = true, altitude = null) {
     b.visible = visible;
     if (!visible) return;
-    const v = vecToScene(vecEci);
+    const v = vecToScene(altitude == null ? vecEci : liftEci(vecEci, altitude));
     const a = b.geometry.attributes.position;
     a.array[0] = v.x; a.array[1] = v.y; a.array[2] = v.z;
     a.needsUpdate = true;
@@ -259,7 +309,7 @@ export function createPlayback(view) {
     let n = 0;
     for (const s of samples) {
       if (s.t > upTo) break;
-      const v = vecToScene(s.r);
+      const v = vecToScene(liftEci(s.r, s.altitude));
       pos[n * 3] = v.x; pos[n * 3 + 1] = v.y; pos[n * 3 + 2] = v.z;
       n++;
       if (n >= maxPoints) break;
@@ -291,6 +341,7 @@ export function createPlayback(view) {
     lastPhase = null;
     if (!m?.deployment?.reference) return;
 
+    altRefH = Math.max(m.design.inputs.altitude, 120e3);
     jd0 = dateToJulian(m.deployment.startDate);
     syncEarth(0);
 
@@ -321,10 +372,26 @@ export function createPlayback(view) {
     ascentTrail = makeTrail(0xffa040, asc.samples.length + 4, 5);
     returnTrail = makeTrail(0x6fc8ff, (m.deployment.recovery?.samples.length ?? 0) + 4, 4);
 
-    beacons.vehicle = makeBeacon(0xfff0d8, 18);
-    beacons.booster = makeBeacon(0x9fe4ff, 13);
-    beacons.station = makeBeacon(0x9dffc9, 16);
-    beacons.site = makeBeacon(0xff8a6b, 10);
+    // Deliberately small. An 18 px blob on a vehicle 2 px above the limb hides
+    // the very thing it is there to show.
+    beacons.vehicle = makeBeacon(0xfff0d8, 10);
+    beacons.booster = makeBeacon(0x9fe4ff, 8);
+    beacons.station = makeBeacon(0x9dffc9, 14);
+    beacons.site = makeBeacon(0xff8a6b, 9);
+    beacons.subpoint = makeBeacon(0xff8a6b, 5);
+
+    // Altitude spoke: a line from the point on the surface directly beneath the
+    // vehicle up to the vehicle. A gap of a few pixels is ambiguous on its own;
+    // a line with a marker at each end is not, and it is what makes "it has
+    // left the ground" legible at planetary range.
+    const spokeGeo = new THREE.BufferGeometry();
+    spokeGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+    altSpoke = new THREE.Line(spokeGeo, new THREE.LineBasicMaterial({
+      color: 0xffb066, transparent: true, opacity: 0.65,
+    }));
+    altSpoke.frustumCulled = false;
+    altSpoke.visible = false;
+    root.add(track(altSpoke));
 
     // ---- orbital plane -----------------------------------------------------
     // Taken from the injection state, not from the requested inclination with
@@ -600,6 +667,25 @@ export function createPlayback(view) {
     padSmoke.material.size = toScene(vehicleRadius * 6);
   }
 
+  /** Draw the altitude spoke under a vehicle, or hide it. */
+  function setSpoke(r, h) {
+    if (!altSpoke) return;
+    if (!(h > 0)) {
+      altSpoke.visible = false;
+      setBeacon(beacons.subpoint, null, false);
+      return;
+    }
+    const foot = dropEci(r, h);
+    const a = vecToScene(foot);
+    const b = vecToScene(liftEci(r, h));
+    const arr = altSpoke.geometry.attributes.position.array;
+    arr[0] = a.x; arr[1] = a.y; arr[2] = a.z;
+    arr[3] = b.x; arr[4] = b.y; arr[5] = b.z;
+    altSpoke.geometry.attributes.position.needsUpdate = true;
+    altSpoke.visible = true;
+    setBeacon(beacons.subpoint, foot, true);
+  }
+
   // ---------------------------------------------------- sample interpolation
   function sampleAt(list, t) {
     if (!list?.length) return null;
@@ -845,7 +931,8 @@ export function createPlayback(view) {
         time: t,
       });
 
-      setBeacon(beacons.vehicle, s.r, true);
+      setBeacon(beacons.vehicle, s.r, true, s.altitude);
+      setSpoke(s.r, s.altitude);
       fillTrail(ascentTrail, asc.samples, t);
       updateSmoke(padEci0, t, rocket.radius);
       placePad(padEci0, t);
@@ -868,7 +955,7 @@ export function createPlayback(view) {
             retro: true, throttle: 0.6, time: t,
             legDeploy: 0, finDeflect: 0.3,
           });
-          setBeacon(beacons.booster, b.r, true);
+          setBeacon(beacons.booster, b.r, true, b.altitude);
           fillTrail(returnTrail, rec.samples, t);
         }
       } else {
@@ -899,6 +986,7 @@ export function createPlayback(view) {
         ['MASS', `${(s.mass / 1000).toFixed(0)} t`],
         ['Q', `${(s.dynamicPressure / 1000).toFixed(1)} kPa`],
       ];
+      out.scaleNote = `wide view: altitude ×${ALT_GAIN} near the ground, true at orbit`;
       const near = asc.events.find((e) => t >= e.t - 0.5 && t <= e.t + 20);
       if (near) out.event = near.name.replace(/-/g, ' ').toUpperCase();
       if (ph.key === 'pad') { out.event = 'IGNITION'; out.phase = 'Pre-launch'; }
@@ -911,7 +999,8 @@ export function createPlayback(view) {
       setBeacon(beacons.station, null, false);
       if (orbitRing) orbitRing.visible = true;
       fillTrail(ascentTrail, asc.samples, flightTime);
-      setBeacon(beacons.vehicle, asc.samples[asc.samples.length - 1].r, true);
+      const inj = asc.samples[asc.samples.length - 1];
+      setBeacon(beacons.vehicle, inj.r, true, inj.altitude);
       if (padSmoke) padSmoke.visible = false;
       if (padModel) padModel.visible = false;
 
@@ -934,7 +1023,8 @@ export function createPlayback(view) {
           legDeploy: clamp((10e3 - alt) / 7e3, 0, 1) * (t > landingT - 25 ? 1 : 0),
           finDeflect: clamp((70e3 - alt) / 40e3, 0, 1),
         });
-        setBeacon(beacons.booster, b.r, true);
+        setBeacon(beacons.booster, b.r, true, b.altitude);
+        setSpoke(b.r, b.altitude);
         fillTrail(returnTrail, rec.samples, t);
         syncEarth(t);
 
@@ -949,6 +1039,7 @@ export function createPlayback(view) {
           ['MODE', rec.profile.name],
           ['RANGE', `${rec.downrangeKm?.toFixed(0) ?? '—'} km`],
         ];
+        out.scaleNote = `wide view: altitude ×${ALT_GAIN} near the ground, true at orbit`;
         const ev = rec.events.find((e) => t >= e.t - 0.5 && t <= e.t + 16);
         if (ev) out.event = ev.name.replace(/-/g, ' ').toUpperCase();
         if (lp > 0.94) {
@@ -998,6 +1089,7 @@ export function createPlayback(view) {
       setBeacon(beacons.vehicle, null, false);
       setBeacon(beacons.booster, null, false);
       setBeacon(beacons.site, null, false);
+      setSpoke(null, 0);
       if (orbitRing) orbitRing.visible = true;
 
       const altKm = reentering ? lerp(pr.altitudeKm, 95, smooth(lp)) : pr.altitudeKm;
