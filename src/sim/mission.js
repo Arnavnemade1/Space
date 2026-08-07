@@ -30,6 +30,8 @@ import { simulateAscent } from './ascent.js';
 import { VEHICLES, LAUNCH_SITES } from './vehicles.js';
 import { orbitalLifetime, stationKeepingDeltaV } from './orbit.js';
 import { environmentalFlux, COATINGS } from './thermal.js';
+import { simulateRecovery, RECOVERY_MODES } from './recovery.js';
+import { geodeticToEcef, ecefToEci, gmst } from './frames.js';
 import { SIGMA_SB, T_CMB } from './constants.js';
 import { R_EARTH_EQ, G0, DEG, YEAR_JULIAN } from './constants.js';
 
@@ -116,6 +118,7 @@ export function planDeployment(cfg) {
     inclination,
     campaign = CAMPAIGN_DEFAULTS,
     startDate = new Date('2030-01-01T00:00:00Z'),
+    recoveryMode = 'droneship',
   } = cfg;
 
   const vehicle = VEHICLES[vehicleId];
@@ -123,10 +126,19 @@ export function planDeployment(cfg) {
 
   // Fly one representative ascent at a trial payload to find what this vehicle
   // actually delivers to this orbit, by bisection on the integrated trajectory.
+  // The epoch has to be the campaign's own start date, not the default "now".
+  // Every ECI position in the trajectory is referenced to the GMST at its
+  // epoch, so flying the ascent against today's sidereal angle and then
+  // converting the landing point back with 2030's puts the booster on the wrong
+  // side of the planet -- a Cape Canaveral launch appearing to splash down in
+  // the Pacific.
   const flyTrial = (m) => simulateAscent({
     vehicle, site, payloadMass: m,
     targetAltitude: altitude, targetInclination: inclination,
-    sampleInterval: 10,
+    reusableBooster: recoveryMode !== 'none',
+    recoveryMode,
+    epoch: startDate,
+    sampleInterval: 4,
   });
 
   let lo = 100;
@@ -147,6 +159,43 @@ export function planDeployment(cfg) {
     const mid = (lo + hi) / 2;
     const res = flyTrial(mid);
     if (res.success) { lo = mid; reference = res; } else { hi = mid; }
+  }
+
+  // --- fly the booster home ------------------------------------------------
+  // The ascent throws the first stage away at separation; whether it can
+  // actually get back is a separate trajectory with its own propellant bill,
+  // and a booster that cannot land was never reusable however much was
+  // reserved for it.
+  let recovery = null;
+  if (reference && recoveryMode !== 'none' && vehicle.stages.length > 1) {
+    const sep = reference.events.find((e) => e.name === 'stage-separation');
+    if (sep) {
+      const smp = reference.samples.reduce(
+        (best, x) => (Math.abs(x.t - sep.t) < Math.abs(best.t - sep.t) ? x : best),
+        reference.samples[0]);
+      const s0 = vehicle.stages[0];
+      const jd = (startDate.getTime() / 86400000) + 2440587.5;
+      const siteEci = ecefToEci(
+        geodeticToEcef(site.latitude, site.longitude, site.altitude), gmst(jd));
+
+      recovery = simulateRecovery({
+        r0: smp.r, v0: smp.v, t0: smp.t,
+        dryMass: s0.dryMass,
+        propellant: reference.recoveryReserveKg ?? 0,
+        isp: s0.ispVacuum,
+        diameter: vehicle.diameter,
+        engineThrust: s0.thrustSeaLevel / (s0.engines || 9),
+        landingEngines: (s0.engines || 9) >= 20 ? 3 : 1,
+        entryEngines: (s0.engines || 9) >= 20 ? 9 : 3,
+        mode: recoveryMode,
+        siteEci,
+        siteLatLon: { latitude: site.latitude, longitude: site.longitude },
+        jd0: jd,
+      });
+      recovery.separation = {
+        t: smp.t, altitude: smp.altitude, speed: smp.speed, r: smp.r, v: smp.v,
+      };
+    }
   }
 
   const deliverablePerFlight = lo * campaign.payloadEfficiency;
@@ -186,6 +235,8 @@ export function planDeployment(cfg) {
     expectedAttempts,
     massPerFlight,
     manifest,
+    recovery,
+    recoveryMode,
     startDate,
     fullCapabilityDate: lastOnline,
     deploymentYears: (lastOnline - startDate) / (YEAR_JULIAN * 1000),
@@ -536,6 +587,7 @@ export function simulateMission(cfg) {
   const deployment = planDeployment({
     totalMass: design.mass.total,
     vehicleId, siteId, altitude, inclination, campaign, startDate,
+    recoveryMode: cfg.recoveryMode ?? 'droneship',
   });
 
   if (!deployment.feasible) {

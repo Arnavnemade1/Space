@@ -34,7 +34,12 @@ const state = {
 
   // launch configuration
   vehicleId: 'falcon9',
-  siteId: 'ksc',
+  // Vandenberg, California. The default datacenter orbit is sun-synchronous at
+  // 97.6 deg, and Kennedy cannot fly that: its range-safety corridor is
+  // 35-120 deg of azimuth and a retrograde sun-sync launch needs roughly 190.
+  // Vandenberg's southerly corridor is the US pad that actually flies these
+  // orbits -- which is why every American polar mission goes from there.
+  siteId: 'vandenberg',
   payloadMass: 15000,
   targetAltitude: 500e3,
   targetInclination: 28.6,
@@ -58,6 +63,7 @@ const state = {
   groundStations: 8,
   transmitPower: 200,
   costVehicle: 'starshipEarly',
+  recoveryMode: 'droneship',
 
   // explore
   study: 'orbitBand',
@@ -104,6 +110,9 @@ const resultsRoot = document.getElementById('results-root');
 const hud = document.getElementById('hud');
 const clockEl = document.getElementById('clock');
 const scrub = document.getElementById('scrub');
+const insetEl = document.getElementById('inset');
+const insetLabel = document.getElementById('inset-label');
+const insetScale = document.getElementById('inset-scale');
 
 let chartSeries = 'altitude';
 
@@ -234,6 +243,7 @@ function runMission() {
     vehicleId: state.vehicleId,
     siteId: state.siteId,
     costVehicle: state.costVehicle,
+    recoveryMode: state.recoveryMode,
     design: {
       betaAngle: state.betaAngle,
       shieldingMm: state.shieldingMm,
@@ -296,6 +306,8 @@ function refreshScene() {
   // Mission playback owns the whole scene; the static overlays would only
   // clutter a shot that is already showing the real vehicle and station.
   if (state.tab === 'mission') {
+    // Playback owns the globe's rotation and lighting: it has to match the
+    // epoch the trajectory was integrated against, not the wall clock.
     overlays.setAscent(null);
     overlays.setGroundTrack(null, view.earth);
     overlays.setDatacenter(null, null);
@@ -389,6 +401,10 @@ function updateHud() {
       lines.push('');
       for (const [k, v] of t.lines) {
         lines.push(`${k.padEnd(7).replace(/ /g, '&nbsp;')} <span class="hv">${v}</span>`);
+      }
+      if (t.scaleNote) {
+        lines.push('');
+        lines.push(`<span class="dim">${t.scaleNote}</span>`);
       }
     }
     hud.innerHTML = lines.join('<br>');
@@ -633,11 +649,30 @@ addEventListener('keydown', (e) => {
 let last = performance.now();
 const PLAYBACK_RATE = 8; // simulated seconds per wall-clock second
 
+/**
+ * Draw the tracking camera into the inset rectangle.
+ *
+ * The frame is a DOM element so it can carry a border and a label; the pixels
+ * inside it come from a second scissored pass over the same scene, which is
+ * why the box has to stay transparent and why #viewport spans the whole
+ * window (canvas coordinates and page coordinates are then the same thing).
+ */
+function drawInset(frame) {
+  const show = !!(frame && frame.track);
+  insetEl.classList.toggle('hidden', !show);
+  if (!show) return;
+  insetLabel.textContent = frame.track;
+  insetScale.textContent = frame.trackNote ?? 'TRUE SCALE';
+  const r = insetEl.getBoundingClientRect();
+  view.renderInset(r.left, r.top, r.width, r.height);
+}
+
 function loop(now) {
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
 
   if (state.tab === 'mission') {
+    let frame = null;
     if (state.mission) {
       if (state.missionPlaying) {
         // 52 seconds of wall clock for the whole campaign at 1x.
@@ -650,13 +685,19 @@ function loop(now) {
         }
         scrub.value = String(state.missionProgress * 1000);
       }
-      const t = playback.update(state.missionProgress, dt);
-      if (t) { missionHud = t; clockEl.textContent = t.clock; updateHud(); }
+      frame = playback.update(state.missionProgress, dt);
+      if (frame) { missionHud = frame; clockEl.textContent = frame.clock; updateHud(); }
     }
     view.render();
+    // The tracking camera is scissored into the main canvas AFTER the wide
+    // shot, so it must come after view.render() -- the composer writes the
+    // whole framebuffer and would erase it otherwise.
+    drawInset(frame);
     requestAnimationFrame(loop);
     return;
   }
+
+  insetEl.classList.add('hidden');
 
   if (state.playing && state.ascent) {
     const total = state.ascent.summary.flightTime;

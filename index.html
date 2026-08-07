@@ -60,6 +60,13 @@
 
     <div id="hud" class="mono"></div>
 
+    <!-- Tracking camera. The WebGL canvas draws the second view straight into
+         this rectangle, so the box itself is only a frame and a label. -->
+    <div id="inset" class="hidden">
+      <div id="inset-label" class="mono">TRACKING CAM</div>
+      <div id="inset-scale" class="mono"></div>
+    </div>
+
     <div id="modal" class="hidden">
       <div class="modal-box">
         <button id="modal-close" class="ghost modal-close">CLOSE</button>

@@ -48,6 +48,14 @@ export function buildStation(design, flights = 4) {
   const trussLen = Math.max(arr.length * 1.05, rad.length * 2.4);
   const trussR = Math.max(2.2, trussLen * 0.012);
 
+  // Compute-module dimensions up front: the radiators have to be told how far
+  // to stand off so their inner edge clears the module grid slung under the
+  // truss, and now that the panels hang along +/-Y they run straight through
+  // that grid otherwise.
+  const modR = Math.max(3.2, trussR * 2.2);
+  const modL = modR * 3.0;
+  const modDrop = trussR + modR * 1.35;
+
   // ---- truss spine (along X) ---------------------------------------------
   const trussMat = new THREE.MeshStandardMaterial({
     color: 0x8b98a6, metalness: 0.75, roughness: 0.45,
@@ -82,13 +90,20 @@ export function buildStation(design, flights = 4) {
   // A PlaneGeometry lies in its own XY plane with the normal on +Z. Composing
   // Euler angles to reorient it is guesswork that is easy to get subtly wrong,
   // so the target basis is stated outright: the panel's long axis points away
-  // from the truss (+Z), its width runs along the truss (+X), and its face
-  // normal ends up on +Y -- edge-on to the Sun, which is the whole point of a
-  // radiator's attitude.
+  // from the truss (+Y), its width runs along the truss (+X), and its face
+  // normal ends up on +Z.
+  //
+  // That normal is the point of the whole arrangement. Both the arrays and the
+  // radiators rotate about the truss axis, so both normals live in the Y-Z
+  // plane -- and they have to be NINETY DEGREES APART, because the arrays want
+  // to face the Sun and the radiators want to be edge-on to it. Building them
+  // with the same normal (which an earlier version did) is not a cosmetic
+  // slip: it means the radiators are being pointed straight at the Sun, which
+  // is the one attitude in which they cannot reject heat.
   const radBasis = new THREE.Matrix4().makeBasis(
-    new THREE.Vector3(0, 0, 1),   // local X (length)  -> world Z
+    new THREE.Vector3(0, 1, 0),   // local X (length)  -> world Y
     new THREE.Vector3(1, 0, 0),   // local Y (width)   -> world X
-    new THREE.Vector3(0, 1, 0),   // local Z (normal)  -> world Y
+    new THREE.Vector3(0, 0, 1),   // local Z (normal)  -> world Z
   );
 
   const perSide = RADIATOR_PANELS / 2;
@@ -97,16 +112,21 @@ export function buildStation(design, flights = 4) {
       const p = new THREE.Mesh(radGeo, radMat.clone());
       p.quaternion.setFromRotationMatrix(radBasis);
       const spread = (i - (perSide - 1) / 2) * rad.width * 1.35;
-      p.position.set(spread, 0, (side ? 1 : -1) * (rad.length / 2 + trussR * 2.5));
+      p.position.set(spread, (side ? 1 : -1) * (rad.length / 2 + modDrop + modR * 1.1), 0);
       group.add(p);
       parts.radiators.push(p);
     }
   }
 
   // ---- solar array wings ---------------------------------------------------
+  // Amber rather than blue. Photovoltaic cells are close to black, but the
+  // Kapton substrate and the adhesive behind them are not, and every array
+  // ever photographed in orbit -- ISS, Hubble, Landsat -- reads as warm gold
+  // against space for exactly that reason. Pure cell colour renders the wings
+  // invisible, which is both uglier and less true to what a camera sees.
   const cellMat = new THREE.MeshStandardMaterial({
-    color: 0x16305c, metalness: 0.35, roughness: 0.38,
-    emissive: 0x081428, emissiveIntensity: 0.5, side: THREE.DoubleSide,
+    color: 0xa87c42, metalness: 0.42, roughness: 0.46,
+    emissive: 0x2a1c08, emissiveIntensity: 0.8, side: THREE.DoubleSide,
   });
   const arrGeo = new THREE.PlaneGeometry(arr.length, arr.width);
   for (let end = 0; end < 2; end++) {
@@ -122,21 +142,52 @@ export function buildStation(design, flights = 4) {
     }
   }
 
-  // ---- compute modules ----------------------------------------------------
+  // ---- compute modules, laid out as a grid --------------------------------
+  //
+  // Each flight delivers one module and it berths onto the grid. Laying them
+  // out in rows rather than a single line is what a real assembly does: a
+  // hundred-metre string of modules on one axis has no structural depth and
+  // every module is a cantilever off its neighbour, whereas a grid ties back
+  // into the truss on two axes.
   const modMat = new THREE.MeshStandardMaterial({
     color: 0xc4ced8, metalness: 0.5, roughness: 0.4,
   });
-  const modR = Math.max(3.2, trussR * 2.4);
-  const modL = modR * 3.2;
+  const cols = Math.max(1, Math.ceil(Math.sqrt(flights)));
+  const rows = Math.ceil(flights / cols);
+  const pitchX = modL * 1.18;
+  const pitchZ = modR * 2.6;
+
   for (let i = 0; i < flights; i++) {
+    const cx = i % cols;
+    const cz = Math.floor(i / cols);
     const m = new THREE.Mesh(
-      new THREE.CylinderGeometry(modR, modR, modL, 16, 1), modMat.clone());
+      new THREE.CylinderGeometry(modR, modR, modL, 14, 1), modMat.clone());
     m.rotation.z = Math.PI / 2;
-    const spread = (i - (flights - 1) / 2) * modL * 1.15;
-    m.position.set(spread, -trussR * 2.6, 0);
+    m.position.set(
+      (cx - (cols - 1) / 2) * pitchX,
+      -modDrop,
+      (cz - (rows - 1) / 2) * pitchZ,
+    );
+    // Where it flies in from during assembly, and where it ends up.
+    m.userData.home = m.position.clone();
+    m.userData.approach = m.position.clone().add(
+      new THREE.Vector3(0, -trussLen * 0.35, trussLen * 0.22));
     group.add(m);
     parts.modules.push(m);
+
+    // Connecting spine between modules in a row.
+    if (cx > 0) {
+      const link = new THREE.Mesh(
+        new THREE.CylinderGeometry(modR * 0.16, modR * 0.16, pitchX - modL, 6),
+        ringMat);
+      link.rotation.z = Math.PI / 2;
+      link.position.set(m.position.x - pitchX / 2, m.position.y, m.position.z);
+      group.add(link);
+      parts.links = parts.links || [];
+      parts.links.push({ mesh: link, index: i });
+    }
   }
+  parts.gridShape = { cols, rows };
 
   // ---- battery pack, only where there are eclipses -------------------------
   if (design.mass.battery > 0) {
@@ -168,18 +219,35 @@ export function buildStation(design, flights = 4) {
  *   sunDir     THREE.Vector3 in the station's local frame (optional)
  * }
  */
+const smoothstep = (t) => {
+  const x = Math.max(0, Math.min(1, t));
+  return x * x * (3 - 2 * x);
+};
+
 export function updateStation(station, s) {
   const { parts } = station;
   const asm = Math.max(0, Math.min(1, s.assembly ?? 1));
 
-  // Modules appear as their flights are commissioned.
-  const live = Math.round(asm * parts.modules.length);
+  // Modules appear as their flights are commissioned, and the one currently
+  // arriving flies in along its approach path rather than popping into place.
+  const exact = asm * parts.modules.length;
+  const live = Math.floor(exact);
+  const arriving = exact - live;
   parts.modules.forEach((m, i) => {
-    m.visible = i < live;
+    m.visible = i < live || (i === live && arriving > 0.02);
+    if (!m.visible) return;
+    if (i === live) {
+      // Berthing: ease from the approach point onto the grid.
+      const f = smoothstep(arriving);
+      m.position.lerpVectors(m.userData.approach, m.userData.home, f);
+    } else {
+      m.position.copy(m.userData.home);
+    }
     // Dose damage shows as the compute modules going dark and cold.
     const d = s.dose ?? 1;
     m.material.color.setRGB(0.77 * d + 0.18, 0.81 * d + 0.14, 0.85 * d + 0.12);
   });
+  for (const l of parts.links ?? []) l.mesh.visible = l.index < live;
 
   // Radiators deploy progressively and change colour with thermal margin:
   // white while they are coping, amber as margin erodes, glowing red once they
@@ -211,8 +279,12 @@ export function updateStation(station, s) {
     w.mesh.scale.x = f;
     // keep the inboard edge attached to the truss while it extends
     w.mesh.position.x = w.x + (w.end ? 1 : -1) * (w.len * f) / 2;
+    // Cells darken and lose contrast as they take displacement damage, so the
+    // wings dull toward brown rather than changing hue. Values are LINEAR --
+    // Color.setRGB writes the working (linear) space, unlike setHex.
+    const g = 0.52 + 0.48 * a;
     w.mesh.material.emissiveIntensity = 0.18 + 0.5 * a;
-    w.mesh.material.color.setRGB(0.055 + 0.05 * a, 0.14 + 0.05 * a, 0.30 + 0.06 * a);
+    w.mesh.material.color.setRGB(0.560 * g, 0.300 * g, 0.075 * g);
   });
 
   if (parts.battery) parts.battery.visible = asm > 0.25;

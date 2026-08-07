@@ -516,10 +516,74 @@ describe('ascent simulation', () => {
   });
 
   it('reduces payload capability when the booster is recovered', () => {
-    const expendable = simulateAscent({ ...baseline, payloadMass: 20000, reusableBooster: false });
-    const reusable = simulateAscent({ ...baseline, payloadMass: 20000, reusableBooster: true });
-    expect(expendable.success).toBe(true);
-    expect(reusable.success).toBe(false);
+    // The invariant is the ORDERING, not any particular payload failing.
+    // Reserving propellant for the flyback leaves less for the ascent, so the
+    // achievable payload has to fall monotonically as the recovery profile
+    // gets more demanding: expendable > droneship > return-to-launch-site.
+    // (An earlier version of this test asserted that 20 t specifically failed
+    // with recovery, which only held because the reserve was set far too high.)
+    const cap = (recoveryMode) => {
+      let lo = 1000;
+      let hi = 30000;
+      for (let i = 0; i < 12 && hi - lo > 250; i++) {
+        const mid = (lo + hi) / 2;
+        const r = simulateAscent({
+          ...baseline, payloadMass: mid,
+          reusableBooster: recoveryMode !== 'none', recoveryMode,
+          sampleInterval: 8,
+        });
+        if (r.success) lo = mid; else hi = mid;
+      }
+      return lo;
+    };
+
+    const expendable = cap('none');
+    const droneship = cap('droneship');
+    const rtls = cap('rtls');
+
+    expect(droneship).toBeLessThan(expendable);
+    expect(rtls).toBeLessThan(droneship);
+    // And the penalty should be material, not a rounding artefact.
+    expect(expendable - rtls).toBeGreaterThan(1000);
+  });
+
+  it('flies the booster home and lands it on a droneship profile', async () => {
+    const { simulateRecovery } = await import('../src/sim/recovery.js');
+    const { geodeticToEcef, ecefToEci, gmst, dateToJulian } = await import('../src/sim/frames.js');
+
+    const epoch = new Date('2030-01-01T00:00:00Z');
+    const asc = simulateAscent({
+      ...baseline, payloadMass: 12000, reusableBooster: true,
+      recoveryMode: 'droneship', epoch, sampleInterval: 1,
+    });
+    const sep = asc.events.find((e) => e.name === 'stage-separation');
+    expect(sep).toBeTruthy();
+
+    const smp = asc.samples.reduce(
+      (b, x) => (Math.abs(x.t - sep.t) < Math.abs(b.t - sep.t) ? x : b), asc.samples[0]);
+    const s0 = VEHICLES.falcon9.stages[0];
+    const theta = gmst(dateToJulian(epoch));
+
+    const rec = simulateRecovery({
+      r0: smp.r, v0: smp.v, t0: smp.t,
+      dryMass: s0.dryMass, propellant: asc.recoveryReserveKg, isp: s0.ispVacuum,
+      diameter: VEHICLES.falcon9.diameter,
+      engineThrust: s0.thrustSeaLevel / s0.engines,
+      landingEngines: 1, entryEngines: 3,
+      mode: 'droneship',
+      siteEci: ecefToEci(geodeticToEcef(LAUNCH_SITES.ksc.latitude, LAUNCH_SITES.ksc.longitude, 0), theta),
+      siteLatLon: { latitude: LAUNCH_SITES.ksc.latitude, longitude: LAUNCH_SITES.ksc.longitude },
+      jd0: dateToJulian(epoch),
+    });
+
+    // Falcon 9 touches down around 2 m/s; anything above 10 is an impact.
+    expect(rec.softLanding).toBe(true);
+    expect(rec.touchdownSpeed).toBeLessThan(10);
+    // Droneship landings sit several hundred km downrange -- not at the pad,
+    // and not on the far side of the planet.
+    expect(rec.downrangeKm).toBeGreaterThan(200);
+    expect(rec.downrangeKm).toBeLessThan(1400);
+    expect(rec.propellantSufficient).toBe(true);
   });
 
   it('is deterministic', () => {

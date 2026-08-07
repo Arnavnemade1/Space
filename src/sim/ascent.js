@@ -562,10 +562,27 @@ export function simulateAscent(cfg) {
 
   // --- stage mass bookkeeping ----------------------------------------------
   const stages = vehicle.stages.map((s) => ({ ...s }));
-  if (reusableBooster && stages.length > 1) {
-    // Boostback + reentry + landing costs roughly 25% of first-stage
-    // propellant for a downrange landing, more for return-to-launch-site.
-    stages[0] = { ...stages[0], propellantMass: stages[0].propellantMass * 0.75 };
+  // How much first-stage propellant recovery holds back. A downrange droneship
+  // landing needs entry and landing burns only; returning to the launch site
+  // adds a boostback that has to cancel the entire downrange velocity, and that
+  // is by far the biggest of the three. The reserve is what forces an RTLS
+  // booster to stage early and slow -- and it is why RTLS missions carry
+  // noticeably less payload than the same vehicle landing downrange.
+  //
+  // The numbers are small, and deliberately so. Working the real burns for a
+  // Falcon 9 booster: landing needs about 4.5 t, the entry burn about 9 t, and
+  // boostback about 23 t -- roughly 37 t against a 411 t first-stage load, so
+  // under 10%. Reserving 25-40%, as a first guess suggests, leaves the booster
+  // arriving at the pad with a hundred tonnes of dead propellant and a
+  // thrust-to-weight below one: it cannot decelerate, and it cannot land.
+  const RECOVERY_RESERVE = { none: 0, droneship: 0.12, rtls: 0.18 };
+  const recoveryMode = cfg.recoveryMode ?? (reusableBooster ? 'droneship' : 'none');
+  const reserveFraction = RECOVERY_RESERVE[recoveryMode] ?? 0;
+  if (reserveFraction > 0 && stages.length > 1) {
+    stages[0] = {
+      ...stages[0],
+      propellantMass: stages[0].propellantMass * (1 - reserveFraction),
+    };
   }
 
   const fairingMass = vehicle.fairingMass ?? 0;
@@ -1441,6 +1458,8 @@ export function simulateAscent(cfg) {
     reachableInclination,
     azimuthInCorridor,
     azimuthDeg,
+    recoveryMode,
+    recoveryReserveKg: vehicle.stages[0].propellantMass * reserveFraction,
     liftoffTW,
     guidance,
     payloadMass,

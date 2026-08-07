@@ -139,9 +139,13 @@ export function buildConfig(state, set, tab) {
       select('Site',
         Object.values(LAUNCH_SITES).map((s) => [s.id, `${s.name.split(',')[0]} (${s.latitude.toFixed(1)}°)`]),
         state.siteId, (v) => set({ siteId: v })),
-      note('The vehicle is modelled from its own stage data — tank lengths come ' +
-        'from propellant mass over bulk density, so a hydrolox core really is ' +
-        'three times the volume of a kerolox one for the same mass.'),
+      missionSiteWarning(LAUNCH_SITES[state.siteId], state.dcInclination),
+      select('Booster recovery',
+        [['none', 'Expendable'], ['droneship', 'Downrange droneship'], ['rtls', 'Return to launch site']],
+        state.recoveryMode, (v) => set({ recoveryMode: v })),
+      note('The booster flies its own return trajectory — boostback, entry burn, ' +
+        'then a throttled landing burn. Recovery reserves propellant the ascent ' +
+        'cannot use, so payload falls: expendable → droneship → RTLS.'),
     ]));
   }
 
@@ -239,6 +243,36 @@ function studySummary(key) {
     stat('Combinations', String(matrixSize(spec.axes))),
     ...Object.entries(spec.axes).map(([k, v]) => stat(`  ${k}`, `${v.length} levels`)),
   ]);
+}
+
+/**
+ * Flag an orbit the chosen pad cannot legally fly.
+ *
+ * The constraint is range safety, not physics: the trajectory is perfectly
+ * valid, but no regulator will approve a launch whose azimuth sends it over
+ * populated ground. It is the reason polar missions fly from Vandenberg and
+ * equatorial ones from Florida.
+ */
+function missionSiteWarning(site, inclination) {
+  const lat = Math.abs(site.latitude);
+  const sinAz = Math.cos(inclination * DEG) / Math.cos(lat * DEG);
+  if (Math.abs(sinAz) > 1) {
+    return note(`${site.name.split(',')[0]} sits at ${lat.toFixed(1)}° latitude, so it ` +
+      `cannot reach a ${inclination.toFixed(1)}° orbit at all — the orbit plane has to ` +
+      'pass through the pad.');
+  }
+  const az = (Math.asin(sinAz) / DEG + 360) % 360;
+  const alt = (180 - Math.asin(sinAz) / DEG + 360) % 360;
+  const inRange = (a) => {
+    const lo = ((site.azimuthMin % 360) + 360) % 360;
+    const hi = ((site.azimuthMax % 360) + 360) % 360;
+    return lo <= hi ? a >= lo && a <= hi : a >= lo || a <= hi;
+  };
+  if (inRange(az) || inRange(alt)) return null;
+  return note(`A ${inclination.toFixed(1)}° orbit needs an azimuth of about ` +
+    `${Math.round(Math.min(az, alt))}°, outside ${site.name.split(',')[0]}'s flown ` +
+    `corridor of ${site.azimuthMin}°–${site.azimuthMax}°. The trajectory is valid; ` +
+    'the overflight is what would not be approved.');
 }
 
 function vehicleSummary(v) {
@@ -557,6 +591,25 @@ function missionResults(state) {
     stat('Max dynamic pressure',
       `${(m.deployment.reference.summary.maxDynamicPressure / 1000).toFixed(1)} kPa`),
     stat('Peak axial load', `${m.deployment.reference.summary.maxAxialG.toFixed(2)} g`),
+  ]));
+
+  const rec = m.deployment.recovery;
+  wrap.appendChild(group('BOOSTER RECOVERY', rec ? [
+    stat('Profile', rec.profile.name),
+    stat('Outcome', rec.softLanding ? 'LANDED' : 'LOST', rec.softLanding ? 'good' : 'bad'),
+    stat('Touchdown speed', `${rec.touchdownSpeed.toFixed(1)} m/s`,
+      rec.touchdownSpeed < 10 ? 'good' : 'bad'),
+    stat('Downrange', `${rec.downrangeKm?.toFixed(0) ?? '—'} km`),
+    stat('Propellant used', fmtMass(rec.propellantUsed)),
+    stat('Reserve sufficient', rec.propellantSufficient ? 'yes' : 'no',
+      rec.propellantSufficient ? 'good' : 'bad'),
+    stat('Flight time', fmtTime(rec.flightTime)),
+    !rec.softLanding ? note(
+      'The booster does not survive this profile. Staging too fast leaves more ' +
+      'velocity to cancel than the reserved propellant can pay for.') : null,
+  ] : [
+    stat('Profile', 'Expendable'),
+    note('The first stage is discarded. Nothing flies back.'),
   ]));
 
   wrap.appendChild(group('STATION AS BUILT', [

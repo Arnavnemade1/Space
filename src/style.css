@@ -231,6 +231,38 @@ button { font-family: var(--font-ui); }
 }
 #hud .hv { color: var(--accent); }
 
+/* ----------------------------------------------------------- tracking cam */
+/* Only a frame: the renderer scissors the tracking camera straight into this
+   rectangle on the main canvas, so the box must stay transparent. */
+#inset {
+  position: fixed;
+  right: calc(var(--panel-w) + 16px);
+  bottom: calc(var(--timeline-h) + 16px);
+  width: 352px; height: 220px;
+  z-index: 15; pointer-events: none;
+  border: 1px solid var(--edge-bright);
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.6), 0 8px 30px rgba(0,0,0,0.55);
+}
+#inset::after {
+  /* Corner ticks, the way a camera viewfinder is marked. */
+  content: ''; position: absolute; inset: 7px;
+  border: 1px solid rgba(77, 208, 225, 0.16);
+  border-radius: 2px;
+}
+#inset-label, #inset-scale {
+  position: absolute; font-size: 9px; letter-spacing: 0.14em;
+  color: var(--accent); text-shadow: 0 0 6px #000;
+  padding: 3px 6px;
+}
+#inset-label { top: 0; left: 0; }
+#inset-scale { bottom: 0; right: 0; color: var(--dim); letter-spacing: 0.08em; }
+#inset.hidden { display: none; }
+
+@media (max-width: 1500px) {
+  #inset { width: 280px; height: 175px; }
+}
+
 /* ----------------------------------------------------------------- modal */
 #modal {
   position: fixed; inset: 0; z-index: 60; background: rgba(3,5,9,0.82);
