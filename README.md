@@ -9,6 +9,7 @@ npm run dev        # http://localhost:5173
 npm test           # 156 validation assertions
 npm run stress     # 84,000 invariant checks over the whole parameter space
 npm run explore    # list the built-in parameter studies
+node tools/mission.mjs   # end-to-end campaigns: launch, deploy, 12 years, ending
 ```
 
 ## Running variations
@@ -49,7 +50,7 @@ Built-in studies: `orbitBand`, `powerScaling`, `thermalTrade`, `shieldingTrade`,
 `paretoFront`, `sensitivity`, `groupBy`, `rank`, `toCsv` and `toJson` are all
 exported, so you can drive a sweep from your own script.
 
-## The four workspaces
+## The workspaces
 
 | Tab | What you do |
 |---|---|
@@ -58,9 +59,38 @@ exported, so you can drive a sweep from your own script.
 | **ANALYSIS** | Cost vs. a terrestrial datacenter, radiation, downlink. Solves for the breakeven launch price. |
 | **SWEEP** | One design flown at every altitude from 300 km to GEO. |
 | **EXPLORE** | Full parameter matrices, Pareto fronts, sensitivity. |
+| **MISSION** | The whole campaign played back in 3D: a real vehicle flies the trajectory, the station assembles flight by flight, twelve years pass, and it ends however the engine says it does. |
 
 `Space` play/pause · `F` follow vehicle · scroll to zoom (the spacecraft is
 drawn at true scale, so you can fly right up to it).
+
+## Mission playback
+
+The MISSION tab runs a full campaign end to end and renders it, in five phases:
+pad, ascent, deployment, operations, outcome.
+
+Nothing in the scene is a drawing. The launch vehicle is generated from its own
+stage data — tank length is propellant mass over bulk density over
+cross-section — so the vehicles differ because their propellants do. Hydrolox is
+a third the density of kerolox, which is why SLS has a fat core and Ariane 6 a
+small one swamped by solids. Against published heights the model lands at 68 m
+for Falcon 9 (real 70), 121 m for Starship (121), 19 m for Electron (18) and
+42 m for a Falcon Heavy side booster (42). Vehicles whose stage masses are
+estimates come out short, and inherit that flagged uncertainty rather than being
+tuned to match.
+
+The station is the scenario's own design: eight radiator panels really do sum to
+the computed `thermal.area`, four array wings to `power.array.area`. Change the
+orbit, the eclipse fraction changes, the array area changes, and the structure
+on screen grows.
+
+The ending is whichever limit the projection reaches first — planned end of
+life, propellant exhausted and the orbit decaying into the atmosphere, total
+dose exceeding what the electronics tolerate, or thermal runaway. That last one
+is driven by a real mechanism: radiator coatings do not lose emissivity, they
+gain solar absorptivity. Z93 white paint darkens from alpha 0.17 to 0.30 over a
+mission, so a radiator sized at beginning-of-life absorptivity slowly stops
+being able to shed the heat its own computers make.
 
 ## Accuracy
 
@@ -150,8 +180,14 @@ src/sim/         physics — SI units throughout, no DOM, no framework
   comms.js         link budget, Shannon, ground station coverage
   datacenter.js    integrates all of the above into one closed design
   economics.js     cost model and terrestrial comparison
+  explore.js       parameter matrices, Pareto fronts, sensitivity
+  mission.js       launch -> deployment -> 12-year projection -> disposal
   explore.js       parameter matrices, Pareto fronts, sensitivity, export
-src/render/      three.js scene and overlays
+src/render/      three.js scene, overlays, and mission playback
+  scene.js         WGS84 globe, real coastlines, day/night, log depth buffer
+  rocket.js        procedural launch vehicles from stage data
+  station.js       procedural datacenter from the sized design
+  playback.js      five-phase mission playback and camera choreography
 src/ui/          panels, charts, widgets
 tools/           stress harness and explorer CLI
 test/            156 validation assertions

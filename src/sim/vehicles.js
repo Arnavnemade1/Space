@@ -166,6 +166,50 @@ export function grossMass(vehicle, payloadMass) {
   );
 }
 
+/**
+ * Bulk propellant densities [kg/m^3] -- the mixture density of fuel and
+ * oxidiser at their flight mixture ratio, not either component alone.
+ *
+ * This is what sets how BIG a stage is for a given mass, and the spread is
+ * enormous. Hydrolox is a third the density of kerolox, which is why a
+ * hydrogen stage holding half the propellant mass can be twice the length.
+ * SLS and Ariane 6 look the way they do entirely because of this number.
+ */
+export const PROPELLANT_DENSITY = {
+  kerolox: 1030,   // RP-1 / LOX at ~2.56 O/F
+  methalox: 830,   // CH4 / LOX at ~3.6 O/F
+  hydrolox: 360,   // LH2 / LOX at ~6.0 O/F
+  solid: 1770,     // HTPB / ammonium perchlorate composite
+  hypergolic: 1200,
+};
+
+/**
+ * Physical length of a stage's tankage [m], from propellant volume.
+ * `ullageFactor` accounts for the volume tanks carry beyond usable propellant:
+ * ullage space, residuals, common bulkhead geometry and domed ends.
+ */
+export function stageTankLength(stage, diameter, ullageFactor = 1.12) {
+  const rho = PROPELLANT_DENSITY[stage.propellant ?? 'kerolox'];
+  const volume = (stage.propellantMass / rho) * ullageFactor;
+  return volume / (Math.PI * (diameter / 2) ** 2);
+}
+
+/**
+ * Length of ONE strap-on booster [m].
+ *
+ * The stage's `propellantMass` is the total across all of them, so it has to be
+ * divided by `count` before it becomes a single booster's volume -- otherwise a
+ * Falcon Heavy side booster comes out 400 m long.
+ */
+export function boosterLength(stage, ullageFactor = 1.12) {
+  const b = stage.boosters;
+  if (!b) return 0;
+  const rho = PROPELLANT_DENSITY[b.propellant ?? 'solid'];
+  const perUnit = b.propellantMass / (b.count || 1);
+  const volume = (perUnit / rho) * ullageFactor;
+  return volume / (Math.PI * ((b.diameter ?? 2) / 2) ** 2);
+}
+
 // ---------------------------------------------------------------------------
 // Vehicle database
 // ---------------------------------------------------------------------------
@@ -186,6 +230,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'S1 (9x Merlin 1D)',
+        propellant: 'kerolox',
         engines: 9,
         dryMass: 25600,
         propellantMass: 411000,
@@ -197,6 +242,7 @@ export const VEHICLES = {
       },
       {
         name: 'S2 (1x Merlin Vacuum)',
+        propellant: 'kerolox',
         engines: 1,
         dryMass: 3900,
         propellantMass: 107500,
@@ -225,6 +271,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'Centre core (9x Merlin 1D)',
+        propellant: 'kerolox',
         engines: 9,
         dryMass: 25600,
         propellantMass: 411000,
@@ -235,7 +282,9 @@ export const VEHICLES = {
         minThrottle: 0.4,
         boosters: {
           name: '2x Falcon 9 side boosters',
+          propellant: 'kerolox',
           count: 2,
+          diameter: 3.7,
           dryMass: 51200,
           propellantMass: 822000,
           thrustSeaLevel: 15214000,
@@ -283,6 +332,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'Super Heavy (33x Raptor 2)',
+        propellant: 'methalox',
         engines: 33,
         dryMass: 200000,
         propellantMass: 3400000,
@@ -294,6 +344,7 @@ export const VEHICLES = {
       },
       {
         name: 'Ship (3x Raptor SL + 3x Raptor Vac)',
+        propellant: 'methalox',
         engines: 6,
         dryMass: 120000,
         propellantMass: 1200000,
@@ -324,6 +375,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'S1 (9x Rutherford)',
+        propellant: 'kerolox',
         engines: 9,
         dryMass: 950,
         propellantMass: 9250,
@@ -335,6 +387,7 @@ export const VEHICLES = {
       },
       {
         name: 'S2 (1x Rutherford Vacuum)',
+        propellant: 'kerolox',
         engines: 1,
         dryMass: 250,
         propellantMass: 2050,
@@ -364,6 +417,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'S1 (9x Archimedes)',
+        propellant: 'methalox',
         engines: 9,
         dryMass: 22000,
         propellantMass: 350000,
@@ -375,6 +429,7 @@ export const VEHICLES = {
       },
       {
         name: 'S2 (1x Archimedes Vacuum)',
+        propellant: 'methalox',
         engines: 1,
         dryMass: 3000,
         propellantMass: 70000,
@@ -401,6 +456,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'S1 (7x BE-4)',
+        propellant: 'methalox',
         engines: 7,
         dryMass: 68000,
         propellantMass: 1050000,
@@ -412,6 +468,7 @@ export const VEHICLES = {
       },
       {
         name: 'S2 (2x BE-3U)',
+        propellant: 'hydrolox',
         engines: 2,
         dryMass: 14000,
         propellantMass: 160000,
@@ -441,6 +498,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'Core (2x BE-4)',
+        propellant: 'methalox',
         engines: 2,
         dryMass: 25000,
         propellantMass: 340000,
@@ -451,7 +509,9 @@ export const VEHICLES = {
         minThrottle: 0.6,
         boosters: {
           name: '6x GEM-63XL solid',
+          propellant: 'solid',
           count: 6,
+          diameter: 1.6,
           dryMass: 30000,
           propellantMass: 285600,
           // Burn-average thrust, not the peak figure: a GEM-63XL peaks near
@@ -465,6 +525,7 @@ export const VEHICLES = {
       },
       {
         name: 'Centaur V (2x RL10C)',
+        propellant: 'hydrolox',
         engines: 2,
         dryMass: 5500,
         propellantMass: 54000,
@@ -494,6 +555,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'LLPM core (1x Vulcain 2.1)',
+        propellant: 'hydrolox',
         engines: 1,
         dryMass: 14700,
         propellantMass: 140000,
@@ -504,7 +566,9 @@ export const VEHICLES = {
         minThrottle: 1,
         boosters: {
           name: '4x P120C solid',
+          propellant: 'solid',
           count: 4,
+          diameter: 3.4,
           dryMass: 44000,
           propellantMass: 568000,
           // Burn-average thrust per the same reasoning as Vulcan's GEM-63XL.
@@ -516,6 +580,7 @@ export const VEHICLES = {
       },
       {
         name: 'ULPM (Vinci)',
+        propellant: 'hydrolox',
         engines: 1,
         dryMass: 5500,
         propellantMass: 31000,
@@ -546,6 +611,7 @@ export const VEHICLES = {
     stages: [
       {
         name: 'Core stage (4x RS-25D)',
+        propellant: 'hydrolox',
         engines: 4,
         dryMass: 85275,
         propellantMass: 979452,
@@ -556,7 +622,9 @@ export const VEHICLES = {
         minThrottle: 0.67,
         boosters: {
           name: '2x 5-segment SRB',
+          propellant: 'solid',
           count: 2,
+          diameter: 3.71,
           dryMass: 197800,
           propellantMass: 1262370,
           thrustSeaLevel: 29000000,
@@ -567,6 +635,7 @@ export const VEHICLES = {
       },
       {
         name: 'ICPS (1x RL10B-2)',
+        propellant: 'hydrolox',
         engines: 1,
         dryMass: 3800,
         propellantMass: 27000,

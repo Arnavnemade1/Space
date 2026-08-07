@@ -293,6 +293,16 @@ export function createScene(container) {
   const sunLight = new THREE.DirectionalLight(0xfff4e0, 2.6);
   scene.add(sunLight);
 
+  // Camera-mounted fill. A launch that happens to occur during local night at
+  // the pad is perfectly realistic and completely unreadable -- the vehicle
+  // renders as a black silhouette against a black planet. This keeps hardware
+  // legible without pretending the Sun is somewhere it is not: it is dim, and
+  // the directional sunlight still does all the shaping.
+  const fill = new THREE.DirectionalLight(0xaecbe8, 0.85);
+  fill.position.set(0.4, 0.9, 0.7);
+  camera.add(fill);
+  scene.add(camera);
+
   /** Update the Sun direction (unit vector in ECI). */
   function setSunDirection(eci) {
     const v = vecToScene(eci).normalize();

@@ -131,7 +131,21 @@ export function buildConfig(state, set, tab) {
     return frag;
   }
 
-  if (tab === 'design' || tab === 'analysis' || tab === 'sweep') {
+  if (tab === 'mission') {
+    frag.appendChild(group('LAUNCH VEHICLE', [
+      select('Vehicle',
+        Object.values(VEHICLES).map((v) => [v.id, `${v.name}${v.confidence === 'estimated' ? ' *' : ''}`]),
+        state.vehicleId, (v) => set({ vehicleId: v })),
+      select('Site',
+        Object.values(LAUNCH_SITES).map((s) => [s.id, `${s.name.split(',')[0]} (${s.latitude.toFixed(1)}°)`]),
+        state.siteId, (v) => set({ siteId: v })),
+      note('The vehicle is modelled from its own stage data — tank lengths come ' +
+        'from propellant mass over bulk density, so a hydrolox core really is ' +
+        'three times the volume of a kerolox one for the same mass.'),
+    ]));
+  }
+
+  if (tab === 'design' || tab === 'analysis' || tab === 'sweep' || tab === 'mission') {
     frag.appendChild(group('COMPUTE LOAD', [
       slider('IT power', {
         min: 1e4, max: 1e9, log: true, value: state.itPower,
@@ -271,6 +285,7 @@ export function buildResults(state, tab) {
   else if (tab === 'design') frag.appendChild(designResults(state));
   else if (tab === 'analysis') frag.appendChild(analysisResults(state));
   else if (tab === 'sweep') frag.appendChild(sweepResults(state));
+  else if (tab === 'mission') frag.appendChild(missionResults(state));
   else if (tab === 'explore') frag.appendChild(exploreResults(state));
 
   return frag;
@@ -503,6 +518,65 @@ function analysisResults(state) {
     stat('Average rate', `${fmtSI(d.comms.downlink.averageRateBps, 1)}bit/s`),
     stat('Daily volume', `${fmtSI(d.comms.downlink.dailyVolumeBytes, 1, 'B')}`),
     stat('Stations for continuous', String(d.comms.downlink.stationsForContinuous)),
+  ]));
+
+  return wrap;
+}
+
+// -------------------------------------------------------------- mission tab
+function missionResults(state) {
+  const m = state.mission;
+  if (!m) {
+    return empty('Press RUN MISSION.\n\nThe vehicle flies the trajectory the ascent ' +
+      'simulator integrated, the station is built to the design the sizer produced, ' +
+      'and the ending is whichever limit the projection reached first.');
+  }
+
+  const wrap = el('div');
+  const end = m.projection.endReason;
+  const nominal = end === 'planned end of mission';
+
+  wrap.appendChild(el('div', {
+    class: `verdict ${nominal ? 'ok' : 'fail'}`,
+    text: `${nominal ? 'MISSION COMPLETE' : 'MISSION ENDS EARLY'} · Y+${m.projection.endYears.toFixed(1)}`,
+  }));
+  wrap.appendChild(note(end));
+
+  const phases = [
+    ['1 · Pad', `${m.deployment.vehicle.name.split(' /')[0]} at ${m.deployment.site.name.split(',')[0]}`],
+    ['2 · Ascent', `${fmtMass(m.deployment.deliverablePerFlight)} to ${(m.config.altitude / 1000).toFixed(0)} km`],
+    ['3 · Deployment', `${m.deployment.flightsNeeded} flights over ${(m.deployment.deploymentYears * 12).toFixed(1)} months`],
+    ['4 · Operations', `${m.projection.endYears.toFixed(1)} years`],
+    ['5 · Outcome', nominal ? 'planned end of life' : end.split('—')[0].trim()],
+  ];
+  wrap.appendChild(group('PHASES', phases.map(([k, v]) => stat(k, v))));
+
+  wrap.appendChild(group('VEHICLE', [
+    stat('Launch mass', fmtMass(m.design.mass.total)),
+    stat('Per flight', fmtMass(m.deployment.deliverablePerFlight)),
+    stat('Max dynamic pressure',
+      `${(m.deployment.reference.summary.maxDynamicPressure / 1000).toFixed(1)} kPa`),
+    stat('Peak axial load', `${m.deployment.reference.summary.maxAxialG.toFixed(2)} g`),
+  ]));
+
+  wrap.appendChild(group('STATION AS BUILT', [
+    stat('Radiator area', fmtArea(m.design.thermal.area)),
+    stat('Solar array area', fmtArea(m.design.power.array.area)),
+    stat('Battery', m.design.mass.battery > 0 ? fmtMass(m.design.mass.battery) : 'none — no eclipse'),
+    stat('Compute', `${fmtSI(m.design.compute.petaflops, 0)}PFLOPS`),
+    stat('Structure span', `${Math.round(Math.sqrt(m.design.power.array.area) * 2)} m across`),
+  ]));
+
+  const last = m.projection.rows[m.projection.rows.length - 1];
+  wrap.appendChild(group('AT END OF LIFE', [
+    stat('Net output', `${Math.round(last.effective * 100)}%`,
+      last.effective > 0.6 ? 'good' : last.effective > 0.3 ? 'warn' : 'bad'),
+    stat('Array', `${Math.round(last.arrayFactor * 100)}%`),
+    stat('Battery', `${Math.round(last.batteryFactor * 100)}%`),
+    stat('Thermal margin', `${Math.round(last.thermalFactor * 100)}%`,
+      last.thermalFactor > 0.6 ? 'good' : last.thermalFactor > 0.3 ? 'warn' : 'bad'),
+    stat('Radiation health', `${Math.round(last.doseFactor * 100)}%`),
+    stat('Delivered', `${fmtSI(m.projection.totalPflopYears, 1)}PFLOP-yr`),
   ]));
 
   return wrap;

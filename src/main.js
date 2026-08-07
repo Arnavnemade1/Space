@@ -9,6 +9,8 @@
 import { createScene, vecToScene, toScene } from './render/scene.js';
 import { createOverlays } from './render/overlays.js';
 import { createChart } from './ui/chart.js';
+import { createPlayback, PHASES } from './render/playback.js';
+import { simulateMission } from './sim/mission.js';
 import { buildConfig, buildResults } from './ui/panels.js';
 import { MODELS_DOC } from './ui/docs.js';
 
@@ -71,6 +73,12 @@ const state = {
   sweep: null,
   maxPayload: null,
 
+  // mission playback
+  mission: null,
+  missionProgress: 0,
+  missionPlaying: false,
+  missionSpeed: 1,
+
   // playback
   epoch: new Date(),
   playing: false,
@@ -86,6 +94,10 @@ const viewport = document.getElementById('viewport');
 const view = createScene(viewport);
 const overlays = createOverlays(view.scene);
 const chart = createChart(document.getElementById('chart'));
+const playback = createPlayback(view);
+
+// Handles for inspecting the scene from the console during development.
+window.__testbed = { view, playback, overlays, state };
 
 const configRoot = document.getElementById('config-root');
 const resultsRoot = document.getElementById('results-root');
@@ -211,6 +223,35 @@ function runExplore() {
   };
 }
 
+function runMission() {
+  const site = LAUNCH_SITES[state.siteId];
+  state.mission = simulateMission({
+    name: 'Interactive mission',
+    itPower: state.itPower,
+    altitude: state.dcAltitude,
+    inclination: state.dcInclination,
+    missionYears: state.missionYears,
+    vehicleId: state.vehicleId,
+    siteId: state.siteId,
+    costVehicle: state.costVehicle,
+    design: {
+      betaAngle: state.betaAngle,
+      shieldingMm: state.shieldingMm,
+      electronicsClass: state.electronicsClass,
+      solarTech: state.solarTech,
+      batteryTech: state.batteryTech,
+      junctionTemp: state.junctionTemp,
+      band: state.band,
+      groundStations: state.groundStations,
+      transmitPower: state.transmitPower,
+    },
+  });
+  playback.load(state.mission);
+  state.missionProgress = 0;
+  state.missionPlaying = true;
+  document.getElementById('btn-play').textContent = '❚❚';
+}
+
 function runSweep() {
   const altitudes = [300, 400, 500, 600, 700, 800, 1000, 1500, 2000, 3000, 5000,
     8000, 12000, 20200, 35786];
@@ -251,6 +292,20 @@ function refreshScene() {
   overlays.setLaunchSite(LAUNCH_SITES[state.siteId], view.earth);
 
   if (state.tab !== 'explore') overlays.setOrbitFamily(null);
+
+  // Mission playback owns the whole scene; the static overlays would only
+  // clutter a shot that is already showing the real vehicle and station.
+  if (state.tab === 'mission') {
+    overlays.setAscent(null);
+    overlays.setGroundTrack(null, view.earth);
+    overlays.setDatacenter(null, null);
+    overlays.setOrbit(null);
+    overlays.setVehicle(null);
+    chart.setData(state.mission?.deployment?.reference?.samples ?? null,
+                  state.mission?.deployment?.reference?.events ?? []);
+    updateHud();
+    return;
+  }
 
   if (state.tab === 'launch' && state.ascent) {
     const a = state.ascent;
@@ -316,8 +371,29 @@ function sweepOrbitElements(altitude) {
   return { a, e: 0, i: state.dcInclination * DEG, raan: 0.6, argp: 0, nu: 0, p: a };
 }
 
+let missionHud = null;
+const clampUnit = (v) => Math.max(0, Math.min(1, v));
+
 function updateHud() {
   const lines = [];
+  if (state.tab === 'mission') {
+    if (!state.mission) {
+      hud.innerHTML = '<span class="dim">Press RUN MISSION to fly the campaign.<br>' +
+        "The vehicle, the station and the ending are all the engine's own output.</span>";
+      return;
+    }
+    const t = missionHud;
+    if (t) {
+      lines.push(`<span class="hv">${t.phase.toUpperCase()}</span>&nbsp; ${t.clock}`);
+      if (t.event) lines.push(`<span class="hv">${t.event}</span>`);
+      lines.push('');
+      for (const [k, v] of t.lines) {
+        lines.push(`${k.padEnd(7).replace(/ /g, '&nbsp;')} <span class="hv">${v}</span>`);
+      }
+    }
+    hud.innerHTML = lines.join('<br>');
+    return;
+  }
   if (state.tab === 'launch') {
     const s = state.ascent ? sampleAt(state.cursorT) : null;
     if (!s) {
@@ -393,12 +469,31 @@ function setCursor(t) {
   updateHud();
 }
 
+function setMissionCursor(p) {
+  state.missionProgress = clampUnit(p);
+  const t = playback.update(state.missionProgress, 0.016);
+  if (t) { missionHud = t; clockEl.textContent = t.clock; }
+  updateHud();
+}
+
 document.getElementById('btn-play').addEventListener('click', (e) => {
+  if (state.tab === 'mission') {
+    if (state.missionProgress >= 1) state.missionProgress = 0;
+    state.missionPlaying = !state.missionPlaying;
+    e.target.textContent = state.missionPlaying ? '❚❚' : '▶';
+    return;
+  }
   state.playing = !state.playing;
   e.target.textContent = state.playing ? '❚❚' : '▶';
 });
 
 scrub.addEventListener('input', (e) => {
+  if (state.tab === 'mission') {
+    state.missionPlaying = false;
+    document.getElementById('btn-play').textContent = '▶';
+    setMissionCursor(Number(e.target.value) / 1000);
+    return;
+  }
   const total = state.ascent?.summary.flightTime ?? 1;
   setCursor((Number(e.target.value) / 1000) * total);
   state.playing = false;
@@ -417,6 +512,19 @@ document.querySelectorAll('.tab').forEach((btn) => {
     renderConfig();
     renderResults();
     refreshScene();
+
+    if (state.tab === 'mission') {
+      // Playback drives the camera itself; hand it over from wherever the
+      // user was and let it fly.
+      if (!state.mission) runMission();
+      else playback.load(state.mission);
+      state.missionProgress = 0;
+      state.missionPlaying = true;
+      document.getElementById('btn-play').textContent = '❚❚';
+      renderResults();
+      return;
+    }
+    playback.clear();
 
     if (state.tab === 'design' || state.tab === 'analysis') {
       const { r } = elementsToRv(designOrbitElements());
@@ -448,7 +556,8 @@ btnRun.addEventListener('click', () => {
   // would silently never start.
   setTimeout(() => {
     try {
-      if (state.tab === 'explore') runExplore();
+      if (state.tab === 'mission') runMission();
+      else if (state.tab === 'explore') runExplore();
       else if (state.tab === 'sweep') runSweep();
       else {
         runAscent();
@@ -527,6 +636,27 @@ const PLAYBACK_RATE = 8; // simulated seconds per wall-clock second
 function loop(now) {
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
+
+  if (state.tab === 'mission') {
+    if (state.mission) {
+      if (state.missionPlaying) {
+        // 52 seconds of wall clock for the whole campaign at 1x.
+        state.missionProgress += (dt * state.missionSpeed) / 52;
+        if (state.missionProgress >= 1) {
+          state.missionProgress = 1;
+          state.missionPlaying = false;
+          document.getElementById('btn-play').textContent = '▶';
+          renderResults();
+        }
+        scrub.value = String(state.missionProgress * 1000);
+      }
+      const t = playback.update(state.missionProgress, dt);
+      if (t) { missionHud = t; clockEl.textContent = t.clock; updateHud(); }
+    }
+    view.render();
+    requestAnimationFrame(loop);
+    return;
+  }
 
   if (state.playing && state.ascent) {
     const total = state.ascent.summary.flightTime;

@@ -15,7 +15,7 @@
 
 import { R_EARTH_EQ, MU_EARTH, YEAR_JULIAN } from './constants.js';
 import { orbitalPeriod, eclipseFraction, orbitalLifetime, stationKeepingDeltaV, ballisticCoefficient } from './orbit.js';
-import { sizeRadiator } from './thermal.js';
+import { sizeRadiator, COATINGS } from './thermal.js';
 import { sizeArray, sizeBattery, batteryCycles, SOLAR_TECH, BATTERY_TECH, distributionLosses } from './power.js';
 import { annualDose, radiationVerdict, seuRate, doseLifetime, DOSE_TOLERANCE, shieldArealMass } from './radiation.js';
 import { linkBudget, downlinkCapacity, slantRange, BANDS } from './comms.js';
@@ -118,6 +118,29 @@ export function designDatacenter(cfg) {
     receiveDiameter = 13,
     transmitPower = 200,
     dragArea = null,
+    /** Radiator coating, keyed into COATINGS. */
+    coating = 'whitePaintZ93',
+    /**
+     * Size the radiator at end-of-life solar absorptivity rather than
+     * beginning-of-life. Standard practice, and the difference is not small:
+     * Z93 white paint darkens from alpha 0.17 to 0.30 over a mission, and a
+     * radiator sized at BOL is roughly 20% short by the end of its life.
+     */
+    sizeForEndOfLife = true,
+    /**
+     * Radiator pointing, degrees from the panel normal. Perfect edge-on
+     * pointing to both Sun and nadir makes the environmental load identically
+     * zero, which is the ideal case and not an achievable one -- attitude error,
+     * finite panel width and structural re-radiation all put flux on the panel.
+     */
+    radiatorSunIncidenceDeg = 78,
+    radiatorTiltFromNadirDeg = 75,
+    /**
+     * Additional dry mass not produced by the subsystem models -- used by the
+     * mission layer to carry disposal propellant, which the single-spacecraft
+     * sizing has no reason to know about.
+     */
+    extraMass = 0,
   } = cfg;
 
   const compute = COMPUTE_PROFILES[computeProfile];
@@ -167,16 +190,21 @@ export function designDatacenter(cfg) {
   // ---- thermal -----------------------------------------------------------
   // Worst case: the radiator is sized for full sunlight, since that is when it
   // is least effective and the load is unchanged.
+  const coatingSpec = COATINGS[coating] ?? COATINGS.whitePaintZ93;
+  const designAlpha = sizeForEndOfLife ? coatingSpec.alphaEOL : coatingSpec.alpha;
+
   const radiator = sizeRadiator({
     heatLoad,
     junctionTemp,
     orbitRadius,
     sunlitFraction: 1,
     arealMass: radiatorArealMass,
-    // Radiators are held edge-on to the Sun and edge-on to nadir; this is the
-    // whole reason a datacenter would need active attitude control.
-    sunIncidenceAngle: Math.PI / 2,
-    tiltFromNadir: Math.PI / 2,
+    alpha: designAlpha,
+    // Radiators are held as near edge-on to the Sun and to nadir as attitude
+    // control allows; that is the whole reason a datacenter of this kind needs
+    // active attitude control at all.
+    sunIncidenceAngle: radiatorSunIncidenceDeg * (Math.PI / 180),
+    tiltFromNadir: radiatorTiltFromNadirDeg * (Math.PI / 180),
   });
 
   // ---- mass budget -------------------------------------------------------
@@ -195,7 +223,8 @@ export function designDatacenter(cfg) {
     (Number.isFinite(radiator.mass) ? radiator.mass : 0) +
     array.mass +
     batt.mass +
-    shieldingMass;
+    shieldingMass +
+    extraMass;
 
   const structureMass = subtotal * structureFraction;
 
@@ -260,14 +289,34 @@ export function designDatacenter(cfg) {
     });
   }
   if (decay.decayed && decay.years < missionYears) {
+    // A short unpowered decay life is not automatically fatal -- the vehicle
+    // carries propellant precisely to hold station against it. What matters is
+    // whether that propellant is a sane fraction of the vehicle, and what the
+    // consequence of losing propulsion is.
+    //
+    // Reporting this as fatal regardless was wrong: it condemned designs that
+    // hold altitude comfortably for their whole mission, while saying nothing
+    // about the ones where station-keeping quietly eats a third of the launch
+    // mass. The propellant fraction is the real discriminator.
+    const propellantFraction = propellantMass / totalMass;
+    const survivable = propellantFraction < 0.25;
+
     issues.push({
-      severity: 'fatal',
+      severity: survivable ? 'warning' : 'fatal',
       subsystem: 'orbit',
-      message:
-        `Drag deorbits this vehicle in ${decay.years.toFixed(1)} years, short of the ` +
-        `${missionYears}-year mission. Its ballistic coefficient is only ` +
-        `${ballistic.toFixed(1)} kg/m^2 because the arrays and radiators present ` +
-        `${Math.round(effectiveDragArea)} m^2 of drag area.`,
+      message: survivable
+        ? `Unpowered, drag brings this vehicle down in ${decay.years.toFixed(1)} years — ` +
+          `less than the ${missionYears}-year mission — so it must thrust continuously. ` +
+          `The ${Math.round(propellantMass)} kg propellant load covers that ` +
+          `(${(propellantFraction * 100).toFixed(1)}% of launch mass), but any loss of ` +
+          `propulsion is unrecoverable within ${decay.years.toFixed(1)} years. Ballistic ` +
+          `coefficient is ${ballistic.toFixed(1)} kg/m^2 against ` +
+          `${Math.round(effectiveDragArea)} m^2 of drag area.`
+        : `Drag would deorbit this vehicle in ${decay.years.toFixed(1)} years and holding ` +
+          `altitude costs ${Math.round(propellantMass)} kg — ` +
+          `${(propellantFraction * 100).toFixed(0)}% of launch mass. At that point the ` +
+          `vehicle is mostly a propellant tank; fly higher or cut the ` +
+          `${Math.round(effectiveDragArea)} m^2 of drag area.`,
     });
   }
   if (radLifeYears < missionYears) {
@@ -331,7 +380,14 @@ export function designDatacenter(cfg) {
       batteryLifeOk,
       pmad,
     },
-    thermal: { heatLoad, ...radiator },
+    thermal: {
+      heatLoad, ...radiator,
+      coating: coatingSpec.name,
+      designAlpha,
+      sizedForEndOfLife: sizeForEndOfLife,
+      sunIncidenceDeg: radiatorSunIncidenceDeg,
+      tiltFromNadirDeg: radiatorTiltFromNadirDeg,
+    },
     mass: {
       it: itMass,
       radiator: Number.isFinite(radiator.mass) ? radiator.mass : Infinity,
@@ -349,7 +405,7 @@ export function designDatacenter(cfg) {
         ['Batteries', batt.mass],
         ['Shielding', shieldingMass],
         ['Structure', structureMass],
-        ['Propulsion + propellant', propellantMass + propulsionDryMass],
+        ['Propulsion + propellant', propellantMass + propulsionDryMass + extraMass],
       ],
     },
     radiation: { ...radVerdict, lifetimeYears: radLifeYears, tolerance, seu },

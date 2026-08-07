@@ -12,7 +12,8 @@
     "stress": "node tools/stress.mjs",
     "stress:quick": "node tools/stress.mjs --quick",
     "explore": "node tools/explore.mjs",
-    "verify": "vitest run && node tools/stress.mjs"
+    "verify": "vitest run && node tools/stress.mjs",
+    "mission": "node tools/mission.mjs"
   },
   "dependencies": {
     "three": "^0.171.0",
