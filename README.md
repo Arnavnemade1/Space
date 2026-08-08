@@ -5,10 +5,11 @@ An interactive 3D physics engine, trade-off explorer, and mission simulator for 
 ```bash
 npm install
 npm run dev          # Interactive 3D Web UI (http://localhost:5173)
-npm test             # 157 automated physics validation assertions
+npm test             # 181 automated physics and scenario assertions
 npm run stress       # 84,439 invariant checks across full parameter matrices
 node tools/explore.mjs # Parameter space explorer & Pareto front solver
 node tools/mission.mjs # 12-year end-to-end mission campaign simulation
+node tools/scenarios.mjs # Grade a design against every failure mode below
 ```
 
 ---
@@ -23,11 +24,13 @@ node tools/mission.mjs # 12-year end-to-end mission campaign simulation
    - [Downlink & Latency Constraints](#5-downlink--latency-constraints)
    - [Launch Economics & Terrestrial Breakeven](#6-launch-economics--terrestrial-breakeven)
 3. [Exhaustive Outcomes & Engineering Solutions Matrix](#exhaustive-outcomes--engineering-solutions-matrix)
+   - [Running the Matrix as an Engine](#running-the-matrix-as-an-engine)
 4. [How to Test All Designs (Testing & Simulation Guide)](#how-to-test-all-designs-testing--simulation-guide)
    - [Level 1: Automated Unit & Physics Invariant Testing](#level-1-automated-unit--physics-invariant-testing)
    - [Level 2: Parameter Matrix Exploration & Pareto Solver (CLI)](#level-2-parameter-matrix-exploration--pareto-solver-cli)
    - [Level 3: End-to-End 12-Year Mission Lifecycle Simulation](#level-3-end-to-end-12-year-mission-lifecycle-simulation)
-   - [Level 4: Interactive 3D Workspaces (Web UI)](#level-4-interactive-3d-workspaces-web-ui)
+   - [Level 4: Failure-Mode Grading & Remedy Search](#level-4-failure-mode-grading--remedy-search)
+   - [Level 5: Interactive 3D Workspaces (Web UI)](#level-5-interactive-3d-workspaces-web-ui)
 5. [Model Accuracy & Validation Reference Standards](#model-accuracy--validation-reference-standards)
 6. [Codebase Architecture & Directory Layout](#codebase-architecture--directory-layout)
 
@@ -94,6 +97,49 @@ Modeled parametrically in `src/sim/radiation.js` across orbital altitudes and in
 | **Downlink Bottleneck** | Downlink pipe saturated; 95% of computed output stranded in orbit. | Terabit-scale high-throughput downlink. | **Optical Laser Downlink**: 100 Gbps to 1 Tbps laser transceivers. **Edge AI Data Filtering**: Process raw data on-orbit before transmission. |
 | **Launch Economics** | Project cost 50x higher than terrestrial datacenter; commercial failure. | Cost parity ($/PFLOP-year) with terrestrial datacenters. | **Next-Gen Heavy Lift (Starship/New Glenn)**: Launch costs $\le \$200\text{/kg}$. High compute density per unit payload mass. |
 
+### Running the Matrix as an Engine
+
+The table above is executable. `src/sim/scenarios.js` encodes every row as a
+scenario that **measures** its own number from the physics modules, **grades**
+it against the thresholds stated here, **applies** the engineering solution and
+recomputes, and **reports what the fix breaks elsewhere**.
+
+That last part is the one a table structurally cannot express, because its rows
+are independent and the real system is not:
+
+```bash
+node tools/scenarios.mjs --alt 400e3 --inc 51.6 --solve drag
+```
+```
+✓ Station above 600 km        marginal → viable   decay 15.9 yr, 23 m/s to hold station
+✓ Station at 1,000 km         marginal → viable   decay 367.2 yr, 2 m/s to hold station
+                              breaks radiationTid: viable → fail
+```
+
+Escaping drag by climbing walks into the inner proton belt. Running silicon
+hotter to shrink the radiator eats power margin. Higher-energy battery cells
+halve the mass and halve the cycle life, and a LEO station charges sixteen times
+a day. Every remedy is re-graded against **all** scenarios and any regression is
+reported alongside the fix.
+
+| Command | What it does |
+| :--- | :--- |
+| `node tools/scenarios.mjs` | Grade the five named cases below against all seven scenarios |
+| `node tools/scenarios.mjs --list` | Show every scenario, its thresholds, and its remedies |
+| `node tools/scenarios.mjs --alt 2500e3 --inc 51.6` | Grade one configuration |
+| `... --solve thermal` | Try every documented fix for one scenario and rank them |
+| `... --auto` | Compose fixes greedily until the design closes, or report why it cannot |
+| `... --json out.json` | Structured output for batch runs |
+
+Named cases: `sso` (the architecture the physics favours), `eclipse` (the
+battery tax), `belt` (inner proton belt), `drag` (low orbit), `scale`
+(100 MW thermal).
+
+The engine will not descope its way out of a problem. Halving the compute load
+trivially fixes thermal, mass and cost, so it is offered for comparison and
+explicitly tagged — but the auto-resolver never selects it, because changing the
+requirement is not meeting it.
+
 ---
 
 ## How to Test All Designs (Testing & Simulation Guide)
@@ -153,14 +199,25 @@ node tools/mission.mjs --alt 550e3 --inc 51.6
 node tools/mission.mjs --power 100e6
 ```
 
-### Level 4: Interactive 3D Workspaces (Web UI)
+### Level 4: Failure-Mode Grading & Remedy Search
+
+Grade any design against every documented failure mode, and search the
+documented solutions:
+
+```bash
+node tools/scenarios.mjs                          # the five named cases
+node tools/scenarios.mjs --alt 550e3 --inc 51.6   # the eclipse battery tax
+node tools/scenarios.mjs --power 100e6 --auto     # compose fixes until it closes
+```
+
+### Level 5: Interactive 3D Workspaces (Web UI)
 Start the local dev server:
 
 ```bash
 npm run dev
 ```
 
-Open `http://localhost:5173` to interact with 6 dedicated workspaces:
+Open `http://localhost:5173` to interact with 7 dedicated workspaces:
 
 | Workspace | Description & Functionality |
 | :--- | :--- |
@@ -169,6 +226,7 @@ Open `http://localhost:5173` to interact with 6 dedicated workspaces:
 | **ANALYSIS** | Cost vs. terrestrial datacenter, radiation total dose curves, downlink bandwidth, and breakeven launch cost solver. |
 | **SWEEP** | Flie a single design across all altitudes from 300 km to GEO. |
 | **EXPLORE** | Full parameter matrices, Pareto fronts, sensitivity charts, and table rankings. |
+| **SCENARIOS** | The outcomes matrix above, live for the current design. Every row graded from the physics, with each documented remedy applied, recomputed, and shown with what it costs and what it breaks. |
 | **MISSION** | 3D mission playback across 5 phases: pad launch, ascent, orbital assembly, 12-year operation, and disposal. |
 
 ---
@@ -205,12 +263,13 @@ src/sim/         Physics engine — SI units throughout, zero DOM dependencies
   economics.js     Financial cost model and terrestrial comparison solver
   explore.js       Parameter matrix cartesian product, Pareto front solver, sensitivity
   mission.js       End-to-end launch $\to$ assembly $\to$ 12-year projection $\to$ disposal engine
+  scenarios.js     Failure-mode grading, remedy search, and cross-scenario coupling
 src/render/      Three.js 3D graphics engine
   scene.js         WGS84 Earth globe, real coastlines, day/night lighting
   rocket.js        Procedural launch vehicle rendering from stage data
   station.js       Procedural datacenter rendering from sized budgets
-  playback.js      5-phase mission playback and camera choreography
+  playback.js      7-phase mission playback, dual-camera choreography
 src/ui/          Interactive panels, widgets, and charts
-tools/           CLI harnesses: stress.mjs, explore.mjs, mission.mjs
+tools/           CLI harnesses: stress.mjs, explore.mjs, mission.mjs, scenarios.mjs
 test/            Automated Vitest physics validation test suite
 ```

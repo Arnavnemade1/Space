@@ -79,6 +79,11 @@ const state = {
   sweep: null,
   maxPayload: null,
 
+  // scenario engine — failure models the design sizer does not carry
+  latchupProtection: 'none',
+  eccMode: 'secded',
+  edgeFiltering: false,
+
   // mission playback
   mission: null,
   missionProgress: 0,

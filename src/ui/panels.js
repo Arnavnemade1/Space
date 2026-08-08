@@ -19,6 +19,7 @@ import { DOSE_TOLERANCE } from '../sim/radiation.js';
 import { BANDS } from '../sim/comms.js';
 import { LAUNCH_COSTS } from '../sim/economics.js';
 import { STUDIES, matrixSize } from '../sim/explore.js';
+import { SCENARIOS, assess, solve, autoResolve } from '../sim/scenarios.js';
 import { DEG, G0 } from '../sim/constants.js';
 
 const MASS_PALETTE = ['#4dd0e1', '#e8eef6', '#2a6fb0', '#c98fff', '#ff8f6b', '#5ee08a', '#ffc75a'];
@@ -149,7 +150,8 @@ export function buildConfig(state, set, tab) {
     ]));
   }
 
-  if (tab === 'design' || tab === 'analysis' || tab === 'sweep' || tab === 'mission') {
+  if (tab === 'design' || tab === 'analysis' || tab === 'sweep'
+      || tab === 'mission' || tab === 'scenarios') {
     frag.appendChild(group('COMPUTE LOAD', [
       slider('IT power', {
         min: 1e4, max: 1e9, log: true, value: state.itPower,
@@ -229,8 +231,10 @@ export function buildConfig(state, set, tab) {
       note('Prices marked * are targets or estimates for vehicles that are not ' +
         'yet flying commercially. Launch price dominates the comparison, so the ' +
         'ANALYSIS tab solves for the breakeven price instead of asserting one.'),
-    ], { collapsible: true, collapsed: tab !== 'analysis' }));
+    ], { collapsible: true, collapsed: tab !== 'analysis' && tab !== 'scenarios' }));
   }
+
+  if (tab === 'scenarios') frag.appendChild(scenarioConfig(state, set));
 
   return frag;
 }
@@ -321,8 +325,161 @@ export function buildResults(state, tab) {
   else if (tab === 'sweep') frag.appendChild(sweepResults(state));
   else if (tab === 'mission') frag.appendChild(missionResults(state));
   else if (tab === 'explore') frag.appendChild(exploreResults(state));
+  else if (tab === 'scenarios') frag.appendChild(scenarioResults(state));
 
   return frag;
+}
+
+
+// ------------------------------------------------------------ scenarios tab
+/**
+ * The README's outcomes matrix, live.
+ *
+ * Every row is graded against the current design by the scenario engine, and
+ * every remedy is applied and recomputed rather than described -- including
+ * what it breaks elsewhere, which is the part the static table cannot say.
+ */
+const SCENARIO_TONE = { viable: 'good', marginal: 'warn', fail: 'bad' };
+
+export function scenarioConfig(state, set) {
+  const frag = document.createDocumentFragment();
+
+  frag.appendChild(group('SCENARIO INPUTS', [
+    note('These feed the failure models that the design sizer does not carry: '
+       + 'what the station does about latchup and bit flips, and how much of '
+       + 'the compute output has to reach the ground.'),
+    select('Latchup protection', [
+      ['none', 'None — latchup destroys parts'],
+      ['ocp', 'Sub-millisecond over-current protection'],
+    ], state.latchupProtection, (v) => set({ latchupProtection: v })),
+    select('Memory protection', [
+      ['none', 'None'],
+      ['secded', 'SECDED ECC'],
+      ['secdedScrub', 'SECDED ECC + scrubbing'],
+      ['tmr', 'Triple modular redundancy'],
+    ], state.eccMode, (v) => set({ eccMode: v })),
+    checkbox('Edge AI data reduction (downlink conclusions, not raw data)',
+      state.edgeFiltering, (v) => set({ edgeFiltering: v })),
+  ]));
+
+  return frag;
+}
+
+/** The config the scenario engine is graded against, from UI state. */
+export function scenarioCfg(state) {
+  return {
+    itPower: state.itPower,
+    altitude: state.dcAltitude,
+    inclination: state.dcInclination,
+    missionYears: state.missionYears,
+    computeProfile: state.computeProfile,
+    solarTech: state.solarTech,
+    batteryTech: state.batteryTech,
+    betaAngle: state.betaAngle,
+    junctionTemp: state.junctionTemp,
+    electronicsClass: state.electronicsClass,
+    band: state.band,
+    groundStations: state.groundStations,
+    latchupProtection: state.latchupProtection,
+    eccMode: state.eccMode,
+    edgeFiltering: state.edgeFiltering,
+    costVehicle: state.costVehicle,
+  };
+}
+
+function scenarioResults(state) {
+  const wrap = el('div');
+  const cfg = scenarioCfg(state);
+
+  let a;
+  try {
+    a = assess(cfg);
+  } catch (err) {
+    return empty(`Scenario engine could not grade this configuration.\n\n${err.message}`);
+  }
+
+  const label = a.verdict === 'viable' ? 'ALL SCENARIOS VIABLE'
+    : a.verdict === 'marginal' ? 'VIABLE WITH MARGINAL SUBSYSTEMS' : 'NOT VIABLE';
+  wrap.appendChild(el('div', {
+    class: `verdict ${a.verdict === 'viable' ? 'ok' : a.verdict === 'marginal' ? 'warn' : 'fail'}`,
+    text: `${label} · ${a.counts.viable}/${a.verdicts.length}`,
+  }));
+  wrap.appendChild(note(
+    `${a.counts.fail} failing, ${a.counts.marginal} marginal, ${a.counts.viable} viable. `
+    + 'Each row is measured from the physics, not asserted.'));
+
+  for (const v of a.verdicts) {
+    const rows = [
+      el('div', { class: `scenario-head ${SCENARIO_TONE[v.status]}` }, [
+        el('span', { class: 'scenario-status', text: v.status.toUpperCase() }),
+        el('span', { class: 'scenario-name', text: v.name }),
+      ]),
+      el('div', { class: 'scenario-headline', text: v.headline }),
+      ...v.metrics.map(([k, val]) => stat(k, val)),
+    ];
+
+    if (v.status !== 'viable') {
+      rows.push(el('div', { class: 'scenario-fail', text: `Fails when: ${v.failure}` }));
+      rows.push(el('div', { class: 'scenario-viable', text: `Viable when: ${v.viableWhen}` }));
+
+      // Remedies, applied and recomputed.
+      let options = [];
+      try { options = solve(cfg, v.id).options; } catch { options = []; }
+      for (const o of options) {
+        const mark = o.cleared ? '✓' : o.resolved ? '~' : '·';
+        const tone = o.cleared ? 'good' : o.resolved ? 'warn' : 'dim';
+        const kids = [
+          el('div', { class: `remedy-head ${tone}` }, [
+            el('span', { class: 'remedy-mark', text: mark }),
+            el('span', { text: o.remedy.name }),
+            ...(o.remedy.kind === 'descope' ? [el('span', { class: 'remedy-tag', text: 'DESCOPE' })] : []),
+          ]),
+          el('div', { class: 'remedy-result', text: `${o.from} → ${o.to} · ${o.headline}` }),
+          el('div', { class: 'remedy-why', text: o.remedy.summary }),
+        ];
+        if (Math.abs(o.deltaMassKg) > 500) {
+          kids.push(el('div', {
+            class: 'remedy-cost',
+            text: `${o.deltaMassKg > 0 ? '+' : ''}${(o.deltaMassKg / 1000).toFixed(0)} t of vehicle mass`,
+          }));
+        }
+        for (const se of o.sideEffects) {
+          kids.push(el('div', {
+            class: 'remedy-breaks',
+            text: `breaks ${se.id}: ${se.from} → ${se.to}`,
+          }));
+        }
+        rows.push(el('div', { class: 'remedy' }, kids));
+      }
+    }
+
+    wrap.appendChild(group(v.name.toUpperCase(), rows, {
+      collapsible: true, collapsed: v.status === 'viable',
+    }));
+  }
+
+  // What the documented fixes achieve when composed.
+  let auto;
+  try { auto = autoResolve(cfg); } catch { auto = null; }
+  if (auto) {
+    const kids = [note(
+      'Greedy composition: apply the best non-regressing fix for the worst '
+      + 'scenario, re-derive everything, repeat. Descoping the compute is never '
+      + 'chosen — it changes the requirement instead of meeting it.')];
+    for (const step of auto.applied) {
+      kids.push(stat(step.scenario, `${step.name} (${step.from} → ${step.to})`));
+    }
+    if (!auto.applied.length) kids.push(note('Nothing to apply.'));
+    kids.push(el('div', {
+      class: auto.converged ? 'scenario-viable' : 'scenario-fail',
+      text: auto.converged
+        ? 'Composes into a viable design.'
+        : (auto.reason ?? 'Does not converge.'),
+    }));
+    wrap.appendChild(group('IF EVERY DOCUMENTED FIX IS APPLIED', kids, { collapsible: true }));
+  }
+
+  return wrap;
 }
 
 // --------------------------------------------------------------- launch tab

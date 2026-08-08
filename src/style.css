@@ -317,3 +317,46 @@ button { font-family: var(--font-ui); }
   :root { --panel-w: 285px; }
   #hud { display: none; }
 }
+
+/* ------------------------------------------------------------- scenarios */
+.scenario-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.scenario-status {
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em;
+  padding: 2px 6px; border-radius: 2px; border: 1px solid currentColor;
+}
+.scenario-head.good .scenario-status { color: var(--good); }
+.scenario-head.warn .scenario-status { color: var(--warn); }
+.scenario-head.bad  .scenario-status { color: var(--bad); }
+.scenario-name { font-size: 11px; color: var(--text); }
+.scenario-headline {
+  font-size: 11px; line-height: 1.5; color: var(--text);
+  margin: 0 0 8px; padding-left: 2px;
+}
+.scenario-fail, .scenario-viable {
+  font-size: 10px; line-height: 1.5; margin-top: 7px;
+  padding: 5px 8px; border-left: 2px solid; background: rgba(255,255,255,0.02);
+}
+.scenario-fail   { border-color: var(--bad); color: var(--dim); }
+.scenario-viable { border-color: var(--good); color: var(--dim); }
+
+.remedy {
+  margin-top: 8px; padding: 7px 9px; border-radius: 3px;
+  border: 1px solid var(--edge); background: rgba(255,255,255,0.015);
+}
+.remedy-head {
+  display: flex; align-items: baseline; gap: 7px;
+  font-size: 11px; margin-bottom: 3px;
+}
+.remedy-head.good { color: var(--good); }
+.remedy-head.warn { color: var(--warn); }
+.remedy-head.dim  { color: var(--dim); }
+.remedy-mark { font-family: var(--font-mono); }
+.remedy-tag {
+  font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.1em;
+  color: var(--dimmer); border: 1px solid var(--edge-bright);
+  padding: 1px 4px; border-radius: 2px;
+}
+.remedy-result { font-family: var(--font-mono); font-size: 10px; color: var(--text); }
+.remedy-why    { font-size: 10px; line-height: 1.45; color: var(--dim); margin-top: 3px; }
+.remedy-cost   { font-family: var(--font-mono); font-size: 10px; color: var(--warn); margin-top: 3px; }
+.remedy-breaks { font-family: var(--font-mono); font-size: 10px; color: var(--bad); margin-top: 3px; }
